@@ -125,6 +125,10 @@ class SketchViewerRenderer(BaseRenderer):
 
 	def can_render(self) -> bool:
 		"""True only when this path is a Prototype the caller may see."""
+		if self.path.startswith("u/"):
+			# A guest's 404 must not prevent the owner from opening this URL.
+			frappe.local.no_cache = True
+
 		parts = self.path.split("/")
 		if len(parts) != 3 or parts[0] != "u" or not parts[1] or not parts[2]:
 			return False

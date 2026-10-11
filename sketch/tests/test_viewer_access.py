@@ -11,10 +11,15 @@ Two rules, both from spec 6.3 and 6.5:
 - **A bad signature falls through.** It is not an error. A stale link to a
   public Prototype still works, and a stale link to a private one answers 404.
 
-Every request here is made without cookies, so it arrives as a stranger.
+The HTTP cases arrive as strangers. Cache cases also request the page as its owner.
 """
 
-from frappe.tests import IntegrationTestCase
+from unittest.mock import patch
+
+import frappe
+from frappe.tests import IntegrationTestCase, set_user
+from frappe.utils import set_request
+from frappe.website.serve import get_response
 
 from sketch import signature
 from sketch.tests import utils
@@ -156,3 +161,51 @@ class TestViewerAccess(IntegrationTestCase):
 		stamp = signature.mint(self.private.name, ttl_seconds=600)
 		self.assertTrue(signature.verify(self.private.name, stamp["exp"], stamp["sig"]))
 		self.assertFalse(signature.verify(self.public.name, stamp["exp"], stamp["sig"]))
+
+
+class TestViewerWebsiteCache(IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		utils.require_runtime()
+		cls.user = utils.make_user("viewercache", "d2tviewercache")
+		cls.addClassCleanup(utils.drop_user, cls.user)
+		cls.doc = utils.make_prototype(cls.user, "d2t-cache", files=SECRET_FILES)
+		cls.addClassCleanup(utils.drop_prototype, cls.doc.name)
+		cls.path = f"/u/{utils.username_of(cls.user)}/{cls.doc.slug}"
+
+	def setUp(self):
+		# Developer mode normally hides this bug by disabling website caching.
+		self.enterContext(patch.dict(frappe.conf, developer_mode=0, disable_website_cache=0))
+		self.enterContext(patch.dict(frappe.flags, force_website_cache=False))
+		self.enterContext(patch.object(frappe.local, "request", None, create=True))
+		self.enterContext(patch.object(frappe.local, "no_cache", False, create=True))
+		self.enterContext(patch.object(frappe.local, "form_dict", frappe._dict()))
+		self.enterContext(patch.object(frappe.local, "response_headers", frappe._dict()))
+		self.enterContext(patch.dict(frappe.local.response, from_cache=False))
+
+	def request(self, path: str, user: str = "Guest"):
+		frappe.local.no_cache = False
+		frappe.local.response.from_cache = False
+		frappe.local.response_headers = frappe._dict()
+		set_request(method="GET", path=path)
+		url = frappe.local.request.url
+		self.addCleanup(frappe.cache.hdel, "website_404", url)
+		with set_user(user):
+			return get_response(path)
+
+	def test_guest_404_does_not_block_the_owner(self):
+		guest = self.request(self.path)
+		owner = self.request(self.path, self.user)
+
+		self.assertEqual(guest.status_code, 404)
+		self.assertEqual(owner.status_code, 200, owner.get_data(as_text=True)[:400])
+		self.assertTrue(utils.data_slot(owner.get_data(as_text=True))["is_owner"])
+		self.assertFalse(frappe.cache.hget("website_404", frappe.local.request.url))
+
+	def test_missing_viewer_paths_are_not_cached(self):
+		for path in (f"{self.path}-missing", "/u/d2tmissing/nothing", "/u/d2tmissing"):
+			with self.subTest(path=path):
+				response = self.request(path)
+				self.assertEqual(response.status_code, 404)
+				self.assertFalse(frappe.cache.hget("website_404", frappe.local.request.url))
