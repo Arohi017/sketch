@@ -407,6 +407,76 @@ class TestRestore(IntegrationTestCase):
 		self.assertTrue(reply["isError"])
 		self.assertEqual(self.tree()["src/one.txt"], b"uno\n")
 
+	# ----------------------------------------------------------------- prune
+
+	def three_versions(self):
+		first = self.save("first", write={"src/a.txt": "a\n"})
+		second = self.save("second", write={"src/b.txt": "b\n"}, delete=["src/a.txt"])
+		third = self.save("third", edit={"src/one.txt": ("one", "uno")})
+		return first, second, third
+
+	def test_prune_deletes_older_rows_and_keeps_newer_ones(self):
+		_first, second, third = self.three_versions()
+
+		result = api.delete_versions(SLUG, second)
+
+		self.assertEqual(result["deleted"], 2)
+		self.assertEqual([row["sequence"] for row in self.history()], [third])
+
+	def test_prune_refuses_the_current_version(self):
+		_first, _second, third = self.three_versions()
+
+		for sequence in (third, third + 1, 0):
+			with self.assertRaises(frappe.ValidationError):
+				api.delete_versions(SLUG, sequence)
+
+		self.assertEqual(len(self.history()), 3)
+
+	def test_prune_keeps_blobs_that_kept_versions_or_the_disk_use(self):
+		_first, second, third = self.three_versions()
+		tree = self.tree()
+
+		api.delete_versions(SLUG, second)
+
+		# Only the third version's blobs are left, and it still restores.
+		self.assertEqual(self.blobs(), len(set(snapshots._sha(data) for data in tree.values())))
+		self.assertFalse(self.restore(third)["recorded"])
+		self.assertEqual(self.tree(), tree)
+		fourth = self.save("fourth", delete=["src/one.txt"])
+		self.restore(third)
+		self.assertEqual(self.tree(), tree)
+		self.assertGreater(fourth, third)
+
+	def test_prune_dry_run_deletes_nothing_and_reports_what_the_real_run_frees(self):
+		_first, second, _third = self.three_versions()
+		blobs = self.blobs()
+
+		dry = api.delete_versions(SLUG, second, 1)
+
+		self.assertEqual(self.blobs(), blobs)
+		self.assertEqual(len(self.history()), 3)
+		self.assertGreater(dry["freed_bytes"], 0)
+		before = snapshots.usage(self.doc.name)
+		real = api.delete_versions(SLUG, second)
+		self.assertEqual(real, dry)
+		self.assertEqual(before - snapshots.usage(self.doc.name), real["freed_bytes"])
+
+	def test_a_non_owner_cannot_prune(self):
+		_first, second, _third = self.three_versions()
+
+		with set_user(self.other):
+			with self.assertRaises(frappe.DoesNotExistError):
+				api.delete_versions(SLUG, second)
+			with self.assertRaises(frappe.DoesNotExistError):
+				api.history_usage(SLUG)
+
+		self.assertEqual(len(self.history()), 3)
+
+	def test_history_usage_reports_the_store_size_and_cap(self):
+		usage = api.history_usage(SLUG)
+
+		self.assertEqual(usage, {"used_bytes": snapshots.usage(self.doc.name), "cap_bytes": snapshots.HISTORY_CAP_BYTES})
+
 	def test_restore_version_is_marked_destructive(self):
 		self.assertIn("restore_version", tools.DESTRUCTIVE)
 

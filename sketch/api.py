@@ -17,7 +17,17 @@ from datetime import UTC, datetime
 import frappe
 from frappe.utils import cint, convert_utc_to_system_timezone, pretty_date
 
-from sketch import annotations, checkd, prototype, prototype_files, signature, thumbnail, thumbnails, versions
+from sketch import (
+	annotations,
+	checkd,
+	prototype,
+	prototype_files,
+	signature,
+	snapshots,
+	thumbnail,
+	thumbnails,
+	versions,
+)
 from sketch.sketch.doctype.sketch_token import sketch_token
 
 #: The eight recipes from ui.frappe.io/recipes, plus Blank (spec 10). The trees
@@ -501,6 +511,24 @@ def restore_version(slug: str, sequence: int, dry_run: int = 0) -> dict:
 		frappe.throw(frappe._("sequence must be a version number, 1 or more"), frappe.ValidationError)
 
 	return versions.restore(doc, sequence, bool(cint(dry_run)), source="App")
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_versions(slug: str, sequence: int, dry_run: int = 0) -> dict:
+	"""Delete one version and every older one, to free history space.
+
+	`resolve_owned` is the permission check. The current version stays. See
+	`versions.prune`.
+	"""
+	doc = prototype.resolve_owned(slug)
+	return versions.prune(doc, cint(sequence), bool(cint(dry_run)))
+
+
+@frappe.whitelist()
+def history_usage(slug: str) -> dict:
+	"""How much of the history cap this Prototype has used, in bytes."""
+	doc = prototype.resolve_owned(slug)
+	return {"used_bytes": snapshots.usage(doc.name), "cap_bytes": snapshots.HISTORY_CAP_BYTES}
 
 
 @frappe.whitelist()

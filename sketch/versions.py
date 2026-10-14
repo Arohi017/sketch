@@ -223,6 +223,39 @@ def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> d
 	}
 
 
+def prune(doc, sequence: int, dry_run: bool = False) -> dict:
+	"""Delete version `sequence` and every older one, then the blobs nobody needs.
+
+	The current (newest) version is never deletable. A blob stays when a kept
+	version's manifest names it or the tree on disk holds it. Returns
+	{"deleted": rows, "freed_bytes": bytes}. With `dry_run` nothing is removed.
+	"""
+	if not dry_run:
+		lock(doc.name)
+
+	latest = frappe.db.sql(
+		"select max(sequence) from `tabSketch Prototype Version` where prototype = %s", doc.name
+	)[0][0]
+	if sequence < 1 or sequence >= (latest or 0):
+		frappe.throw(
+			frappe._("Only versions older than the current one can be deleted"), frappe.ValidationError
+		)
+
+	deleted = frappe.db.count(VERSION, {"prototype": doc.name, "sequence": ["<=", sequence]})
+	keep = set(snapshots.manifest(doc.name).values())
+	for raw in frappe.get_all(
+		VERSION, filters={"prototype": doc.name, "sequence": [">", sequence]}, pluck="manifest"
+	):
+		keep.update(_parse_manifest(raw).values())
+
+	freed = snapshots.collect(doc.name, keep, dry_run=True)
+	if not dry_run:
+		frappe.db.delete(VERSION, {"prototype": doc.name, "sequence": ["<=", sequence]})
+		snapshots.collect(doc.name, keep)
+
+	return {"deleted": deleted, "freed_bytes": freed}
+
+
 def history(name: str) -> list[dict]:
 	"""Every version of this Prototype, newest first.
 

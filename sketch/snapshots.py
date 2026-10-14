@@ -84,7 +84,7 @@ def capture(name: str) -> dict[str, str]:
 	if fresh and _store_size(name) + added > HISTORY_CAP_BYTES:
 		frappe.throw(
 			frappe._(
-				"This prototype's version history is full ({0}). Fork it to keep saving versions with a fresh history."
+				"This prototype's version history is full ({0}). Delete older versions in History to keep saving, or fork it to start fresh."
 			).format(f"{HISTORY_CAP_BYTES // (1024 * 1024)} MB"),
 			HistoryFullError,
 		)
@@ -159,6 +159,31 @@ def _run(name: str, plan) -> None:
 
 	for absolute, data in writes.items():
 		_write_atomic(absolute, data)
+
+
+def usage(name: str) -> int:
+	"""Bytes the history of this Prototype takes on disk."""
+	return _store_size(name)
+
+
+def collect(name: str, keep: set[str], dry_run: bool = False) -> int:
+	"""Delete every blob whose hash is not in `keep`. Returns the bytes freed.
+
+	Also clears orphans (blobs no version points at). With `dry_run` it only
+	adds up what a real run would free.
+	"""
+	freed = 0
+	for folder, _dirs, files in os.walk(store_dir(name)):
+		for entry in files:
+			if entry in keep or not _SHA.match(entry):
+				continue
+
+			path = os.path.join(folder, entry)
+			freed += os.path.getsize(path)
+			if not dry_run:
+				os.remove(path)
+
+	return freed
 
 
 def forget(name: str) -> None:
