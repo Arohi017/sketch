@@ -557,7 +557,7 @@ function fileLabel(count: number): string {
                   class="flex items-center gap-2 text-p-base text-ink-gray-8"
                 >
                   <span class="lucide-undo-2 size-4 shrink-0 text-ink-gray-5" aria-hidden="true" />
-                  <span class="min-w-0 truncate">Restored version {{ version.restored_from }}</span>
+                  <span class="min-w-0 truncate">Restored v{{ version.restored_from }}</span>
                 </p>
 
                 <p
