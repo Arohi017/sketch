@@ -70,6 +70,9 @@ function hover(s: VSet | null) {
   hovered.value = s?.key ?? null
   box.value = s ? rectOf(s) : null
 }
+// A row can go away under the pointer without a mouseleave: Keep opens a note, the panel closes, the
+// route changes. Each of those clears the outline too.
+watch([() => route.path, open], () => hover(null))
 
 // A switch changes the set's size, so the outline is measured again.
 watch(choices, () => nextTick(() => hovered.value && hover(rows.value.find((s) => s.key === hovered.value) ?? null)), { deep: true })
@@ -90,6 +93,7 @@ const isKept = (s: VSet) => kept[idOf(s)] === currentOf(s)
 const keep = (s: VSet) => {
   const el = s.elements()[0]
   if (!el) return
+  hover(null)
   keepHandler.value?.(el, `Keep "${label(s)}" for ${s.label}. Remove the other variants and the <Variants> wrapper.`)
   kept[idOf(s)] = currentOf(s)!
 }
