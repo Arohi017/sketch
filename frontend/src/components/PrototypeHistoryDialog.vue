@@ -204,19 +204,19 @@ function isLong(version: PrototypeVersion): boolean {
   return version.prompt.split('\n').length > CLAMP_LINES || version.prompt.length > CLAMP_CHARS
 }
 
+/** Every version by sequence. One map for the targets and the search. */
+const bySequence = computed(() => new Map((history.data ?? []).map((row) => [row.sequence, row])))
+
 /**
- * The version a restore row points at, by sequence. A restore of a restore
- * follows `restored_from` down to a version the agent actually wrote. Null when
- * the row is gone, or when the chain loops.
+ * The version a restore row points at. A restore of a restore follows
+ * `restored_from` down to a version the agent actually wrote. It always ends:
+ * `restored_from` is lower than the row's own sequence. Null when a row on the
+ * way is gone.
  */
 function restoreTarget(version: PrototypeVersion): PrototypeVersion | null {
-  const bySequence = new Map((history.data ?? []).map((row) => [row.sequence, row]))
-  const seen = new Set<number>()
-  let target = version.restored_from == null ? undefined : bySequence.get(version.restored_from)
+  let target = version.restored_from == null ? undefined : bySequence.value.get(version.restored_from)
   while (target?.kind === 'restore') {
-    if (seen.has(target.sequence) || target.restored_from == null) return null
-    seen.add(target.sequence)
-    target = bySequence.get(target.restored_from)
+    target = target.restored_from == null ? undefined : bySequence.value.get(target.restored_from)
   }
   return target ?? null
 }
@@ -224,7 +224,7 @@ function restoreTarget(version: PrototypeVersion): PrototypeVersion | null {
 /** The row a restore row jumps to: the one whose sequence it restored. */
 function jumpTarget(version: PrototypeVersion): PrototypeVersion | null {
   if (version.kind !== 'restore' || version.restored_from == null) return null
-  return history.data?.find((row) => row.sequence === version.restored_from) ?? null
+  return bySequence.value.get(version.restored_from) ?? null
 }
 
 /** A row opens when it has a file list or a clamped prompt to show. */
