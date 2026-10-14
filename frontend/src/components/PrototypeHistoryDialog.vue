@@ -28,7 +28,7 @@
  * loaded states all have the same size and the dialog never jumps.
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { Badge, Button, Dialog, Dropdown, ErrorMessage, LoadingText, TextInput, toast, useCall } from 'frappe-ui'
+import { Button, Dialog, Dropdown, ErrorMessage, LoadingText, TextInput, toast, useCall } from 'frappe-ui'
 import PrototypeChangeList from './PrototypeChangeList.vue'
 import PrototypeDeleteVersionsDialog from './PrototypeDeleteVersionsDialog.vue'
 import PrototypeRestoreDialog from './PrototypeRestoreDialog.vue'
@@ -135,6 +135,7 @@ const needle = computed(() => query.value.trim().toLowerCase())
 
 function matches(version: PrototypeVersion): boolean {
   if (version.prompt.toLowerCase().includes(needle.value)) return true
+  if (`version ${version.sequence}`.includes(needle.value)) return true
   if (version.kind !== 'restore') return false
   return restoreTarget(version)?.prompt.toLowerCase().includes(needle.value) ?? false
 }
@@ -550,22 +551,13 @@ function fileLabel(count: number): string {
               </div>
 
               <div class="pr-8">
-                <!-- A restore row names the version it went back to. -->
+                <!-- A restore row names the version it went back to. Clicking it jumps there. -->
                 <p
                   v-if="version.kind === 'restore'"
                   class="flex items-center gap-2 text-p-base text-ink-gray-8"
                 >
-                  <span class="min-w-0 truncate">
-                    {{
-                      restoreTarget(version)?.prompt ??
-                      `Version ${version.restored_from ?? version.sequence}`
-                    }}
-                  </span>
-                  <Badge label="Restored" class="shrink-0">
-                    <template #prefix>
-                      <span class="lucide-undo-2 size-full" aria-hidden="true" />
-                    </template>
-                  </Badge>
+                  <span class="lucide-undo-2 size-4 shrink-0 text-ink-gray-5" aria-hidden="true" />
+                  <span class="min-w-0 truncate">Restored version {{ version.restored_from }}</span>
                 </p>
 
                 <p
@@ -589,6 +581,8 @@ function fileLabel(count: number): string {
               </div>
 
               <p class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-gray-5">
+                <span>Version {{ version.sequence }}</span>
+                <span aria-hidden="true">&middot;</span>
                 <template v-if="version.name === currentName">
                   <span class="font-medium text-ink-gray-7">Current</span>
                   <span aria-hidden="true">&middot;</span>
