@@ -556,6 +556,7 @@ function fileLabel(count: number): string {
                   <span class="inline-flex items-center gap-0.5">
                     {{ fileLabel(version.changes.length) }}
                     <span
+                      v-if="version.kind !== 'restore'"
                       class="lucide-chevron-right size-3 transition-transform"
                       :class="{ 'rotate-90': openRows.has(version.name) }"
                       aria-hidden="true"
