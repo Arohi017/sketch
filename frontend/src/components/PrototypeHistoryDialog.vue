@@ -19,11 +19,16 @@
  * toast action under an open dialog cannot be clicked: the click closes the
  * dialog instead.
  *
+ * Rows group under a sticky day header. A click on a row opens it (full prompt
+ * and file list), or on a restore row jumps to the version it restored. The
+ * rows are a roving-tabindex list: arrows move between them, Tab goes on to the
+ * active row's menu. From ten versions up a search box filters by prompt.
+ *
  * The list sits in a fixed-height scroll box, so the loading, empty, error and
  * loaded states all have the same size and the dialog never jumps.
  */
-import { computed, ref, watch } from 'vue'
-import { Badge, Button, Dialog, Dropdown, ErrorMessage, LoadingText, toast, useCall } from 'frappe-ui'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { Badge, Button, Dialog, Dropdown, ErrorMessage, LoadingText, TextInput, toast, useCall } from 'frappe-ui'
 import PrototypeChangeList from './PrototypeChangeList.vue'
 import PrototypeRestoreDialog from './PrototypeRestoreDialog.vue'
 import { method } from '../store'
@@ -32,6 +37,17 @@ import type { Prototype, PrototypeVersion, RestoreResult } from '../types'
 /** A prompt past this many lines or characters is clamped to two lines. */
 const CLAMP_LINES = 2
 const CLAMP_CHARS = 140
+/** The search box shows from this many versions up. */
+const SEARCH_MIN_VERSIONS = 10
+/** How long a jumped-to row stays lit (scroll time), then how long it fades. */
+const FLASH_HOLD_MS = 600
+const FLASH_FADE_MS = 1200
+
+interface DaySection {
+  key: string
+  label: string
+  versions: PrototypeVersion[]
+}
 
 const props = defineProps<{ prototype: Prototype }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -57,22 +73,85 @@ const undoRestore = useCall<RestoreResult, { slug: string; sequence: number; dry
 const restoring = ref<PrototypeVersion | null>(null)
 const confirmOpen = ref(false)
 
-/** Versions whose full prompt is shown, by version name. */
-const openPrompts = ref<Set<string>>(new Set())
-/** Versions whose file list is shown, by version name. */
-const openFiles = ref<Set<string>>(new Set())
+/** Versions that are open (full prompt and file list), by version name. */
+const openRows = ref<Set<string>>(new Set())
+
+const query = ref('')
+const searchRef = ref<{ inputElement: HTMLInputElement | null } | null>(null)
+
+/** The row that holds the tab stop. Falls back to the first visible row. */
+const activeName = ref<string | null>(null)
+const rowEls = new Map<string, HTMLElement>()
+/** The jumped-to row: lit (`flashName`), then fading out (`fadeName`). */
+const flashName = ref<string | null>(null)
+const fadeName = ref<string | null>(null)
+let flashTimers: number[] = []
 
 // The card holds one dialog per Prototype, so the fetch waits for the open.
 // Nothing loads while the gallery only renders the cards.
 watch(open, (value) => {
   if (!value) return
-  openPrompts.value = new Set()
-  openFiles.value = new Set()
+  openRows.value = new Set()
+  query.value = ''
+  activeName.value = null
   history.reload()
+})
+
+onBeforeUnmount(clearFlash)
+
+/**
+ * Escape clears a non-empty search first. The Dialog closes on a document-level
+ * capture listener, so the input cannot stop it; the close is refused here.
+ */
+const dialogOpen = computed({
+  get: () => open.value,
+  set: (value: boolean) => {
+    const input = searchRef.value?.inputElement
+    if (!value && query.value && input && document.activeElement === input) {
+      query.value = ''
+      return
+    }
+    open.value = value
+  },
 })
 
 /** True when some row has no snapshot, so the footer can say why. */
 const hasLegacy = computed(() => history.data?.some((version) => !version.restorable))
+
+const total = computed(() => history.data?.length ?? 0)
+const showSearch = computed(() => total.value >= SEARCH_MIN_VERSIONS)
+const needle = computed(() => query.value.trim().toLowerCase())
+
+function matches(version: PrototypeVersion): boolean {
+  if (version.prompt.toLowerCase().includes(needle.value)) return true
+  if (version.kind !== 'restore') return false
+  return restoreTarget(version)?.prompt.toLowerCase().includes(needle.value) ?? false
+}
+
+const visible = computed(() => {
+  const rows = history.data ?? []
+  return needle.value ? rows.filter(matches) : rows
+})
+
+const sections = computed<DaySection[]>(() => {
+  const result: DaySection[] = []
+  for (const version of visible.value) {
+    const date = versionDate(version)
+    const key = dayKey(date)
+    const last = result[result.length - 1]
+    if (last?.key === key) last.versions.push(version)
+    else result.push({ key, label: dayLabel(date), versions: [version] })
+  }
+  return result
+})
+
+const tabStop = computed(() => {
+  const rows = visible.value
+  return rows.some((row) => row.name === activeName.value) ? activeName.value : rows[0]?.name
+})
+
+/** The newest version, whatever the search hides. */
+const currentName = computed(() => history.data?.[0]?.name)
 
 function askRestore(version: PrototypeVersion): void {
   restoring.value = version
@@ -116,13 +195,6 @@ async function undo(): Promise<void> {
   toast.success('Undid the restore')
 }
 
-function toggle(set: Set<string>, name: string): Set<string> {
-  const next = new Set(set)
-  if (next.has(name)) next.delete(name)
-  else next.add(name)
-  return next
-}
-
 /**
  * A prompt long enough to clamp. Only a request row can be long: a restore or
  * created row is one short line the server wrote.
@@ -149,9 +221,25 @@ function restoreTarget(version: PrototypeVersion): PrototypeVersion | null {
   return target ?? null
 }
 
+/** The row a restore row jumps to: the one whose sequence it restored. */
+function jumpTarget(version: PrototypeVersion): PrototypeVersion | null {
+  if (version.kind !== 'restore' || version.restored_from == null) return null
+  return history.data?.find((row) => row.sequence === version.restored_from) ?? null
+}
+
+/** A row opens when it has a file list or a clamped prompt to show. */
+function isOpenable(version: PrototypeVersion): boolean {
+  return version.kind !== 'restore' && (version.changes.length > 0 || isLong(version))
+}
+
+function isClickable(version: PrototypeVersion): boolean {
+  return isOpenable(version) || jumpTarget(version) !== null
+}
+
 /** The items of a row's ... menu. Empty means the row gets no menu at all. */
-function menuOptions(version: PrototypeVersion, index: number) {
-  if (index > 0 && version.restorable) {
+function menuOptions(version: PrototypeVersion) {
+  const isCurrent = version.name === currentName.value
+  if (!isCurrent && version.restorable) {
     return [
       {
         label: 'Restore this version',
@@ -160,20 +248,125 @@ function menuOptions(version: PrototypeVersion, index: number) {
       },
     ]
   }
-  if (index === 0 && undoTarget.value) {
+  if (isCurrent && undoTarget.value) {
     return [{ label: 'Undo restore', icon: 'lucide-undo-2', onClick: undo }]
   }
   return []
 }
 
-/**
- * The disclosure glyph, shared by both toggles in a row.
- *
- * Tailwind only builds a `lucide-*` class it reads as a literal in this
- * project's source, so both names stay written out here.
- */
-function chevronFor(isOpen: boolean): string {
-  return isOpen ? 'lucide-chevron-down' : 'lucide-chevron-right'
+// ------------------------------------------------------------------- dates
+
+/** The server sends `YYYY-MM-DD HH:mm:ss[.ffffff]`, read as local time. */
+function versionDate(version: PrototypeVersion): Date {
+  return new Date(version.creation.replace(' ', 'T'))
+}
+
+function dayKey(date: Date): string {
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+}
+
+function dayLabel(date: Date): string {
+  const now = new Date()
+  if (dayKey(date) === dayKey(now)) return 'Today'
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+  if (dayKey(date) === dayKey(yesterday)) return 'Yesterday'
+  return date.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() === now.getFullYear() ? undefined : 'numeric',
+  })
+}
+
+function timeLabel(version: PrototypeVersion): string {
+  return versionDate(version).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function fullDate(version: PrototypeVersion): string {
+  return versionDate(version).toLocaleString([], {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  })
+}
+
+// ----------------------------------------------------------- row behaviour
+
+function setRowEl(name: string, el: unknown): void {
+  if (el instanceof HTMLElement) rowEls.set(name, el)
+  else rowEls.delete(name)
+}
+
+function clearFlash(): void {
+  flashTimers.forEach((timer) => window.clearTimeout(timer))
+  flashTimers = []
+  flashName.value = null
+  fadeName.value = null
+}
+
+/** Light the row, hold it while the scroll lands, then fade it out. */
+function flash(name: string): void {
+  clearFlash()
+  flashName.value = name
+  flashTimers.push(
+    window.setTimeout(() => {
+      flashName.value = null
+      fadeName.value = name
+    }, FLASH_HOLD_MS),
+    window.setTimeout(() => {
+      fadeName.value = null
+    }, FLASH_HOLD_MS + FLASH_FADE_MS),
+  )
+}
+
+async function jumpTo(target: PrototypeVersion): Promise<void> {
+  if (!visible.value.includes(target)) {
+    query.value = ''
+    await nextTick()
+  }
+  const el = rowEls.get(target.name)
+  if (!el) return
+  activeName.value = target.name
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  el.focus({ preventScroll: true })
+  flash(target.name)
+}
+
+function activate(version: PrototypeVersion): void {
+  activeName.value = version.name
+  const target = jumpTarget(version)
+  if (target) {
+    jumpTo(target)
+    return
+  }
+  if (!isOpenable(version)) return
+  const next = new Set(openRows.value)
+  if (!next.delete(version.name)) next.add(version.name)
+  openRows.value = next
+}
+
+function focusRow(name: string | undefined): void {
+  if (!name) return
+  activeName.value = name
+  rowEls.get(name)?.focus()
+}
+
+function onRowKeydown(event: KeyboardEvent, version: PrototypeVersion): void {
+  // Keys on the row's own menu button belong to the button.
+  if (event.target !== event.currentTarget) return
+  const rows = visible.value
+  const index = rows.findIndex((row) => row.name === version.name)
+  const moves: Record<string, () => void> = {
+    ArrowDown: () => focusRow(rows[Math.min(index + 1, rows.length - 1)]?.name),
+    ArrowUp: () => focusRow(rows[Math.max(index - 1, 0)]?.name),
+    Home: () => focusRow(rows[0]?.name),
+    End: () => focusRow(rows[rows.length - 1]?.name),
+    Enter: () => activate(version),
+    ' ': () => activate(version),
+  }
+  const move = moves[event.key]
+  if (!move) return
+  event.preventDefault()
+  move()
 }
 
 function versionLabel(count: number): string {
@@ -186,24 +379,40 @@ function fileLabel(count: number): string {
 </script>
 
 <template>
-  <Dialog v-model:open="open" size="xl">
+  <Dialog v-model:open="dialogOpen" size="xl">
     <!-- Same classes as the Dialog's own title, with the count beside it. -->
     <template #title>
       <h3 class="text-2xl-semibold leading-6 text-ink-gray-8">
         History
-        <span v-if="history.data?.length" class="text-base text-ink-gray-5">
-          {{ versionLabel(history.data.length) }}
+        <span v-if="total" class="text-base text-ink-gray-5">
+          {{ needle ? `${visible.length} of ${total}` : versionLabel(total) }}
         </span>
       </h3>
     </template>
 
     <template #default>
+      <TextInput
+        v-if="showSearch"
+        ref="searchRef"
+        v-model="query"
+        class="mb-3"
+        type="text"
+        size="sm"
+        placeholder="Search prompts"
+        aria-label="Search prompts"
+        @keydown.down.prevent="focusRow(visible[0]?.name)"
+      >
+        <template #prefix>
+          <span class="lucide-search size-4 text-ink-gray-5" aria-hidden="true" />
+        </template>
+      </TextInput>
+
       <!--
         `-mx-3 px-3` gives the rows' hover surface room to bleed past the text.
         The scroll box clips on x, so without it the surface would end flush
         with the text.
       -->
-      <div class="-mx-3 h-96 overflow-y-auto px-3">
+      <div class="-mx-3 h-96 overflow-y-auto px-3" :class="{ '!h-80': showSearch }">
         <LoadingText v-if="history.loading && !history.data?.length" />
 
         <ErrorMessage v-else-if="history.error" :message="history.error.message" />
@@ -229,113 +438,141 @@ function fileLabel(count: number): string {
           </p>
         </div>
 
+        <p
+          v-else-if="!visible.length"
+          class="flex h-full items-center justify-center px-6 text-center text-p-sm text-ink-gray-5"
+        >
+          No versions match &ldquo;{{ query.trim() }}&rdquo;
+        </p>
+
         <!--
+          One section per day. The header sticks to the top of the scroll box on
+          the dialog's own background, so the day stays in view. Each section has
+          its own list, so the `first:` and `+li` divider rules work per day.
+
           The divider is a `before:` hairline, not `border-t`: a top border on
           a rounded row bends up into the corners. Inset by the row padding so
-          it spans the text, and hidden above and below a hovered row so the
-          rounded surface never meets a line.
+          it spans the text, and hidden above and below a hovered or focused row
+          so the rounded surface never meets a line.
         -->
-        <ul v-else class="-mx-3">
-          <li
-            v-for="(version, index) in history.data"
-            :key="version.name"
-            class="group relative rounded-6 px-3 py-2.5 before:absolute before:inset-x-3 before:top-0 before:border-t before:border-outline-gray-1 first:before:hidden hover:bg-surface-gray-2 hover:before:hidden [&:hover+li]:before:hidden"
+        <template v-else>
+        <section v-for="(section, sectionIndex) in sections" :key="section.key" class="-mx-3">
+          <h4
+            class="sticky top-0 z-10 bg-surface-elevation-1 px-3 pb-1 text-sm text-ink-gray-5"
+            :class="sectionIndex === 0 ? 'pt-0' : 'pt-3'"
           >
-            <!--
-              Hidden until the row is hovered or focused, and held visible
-              while its menu is open (reka stamps `data-state="open"` on the
-              trigger). Line 1 reserves `pr-8` so the prompt never runs under it.
-            -->
-            <div
-              v-if="menuOptions(version, index).length"
-              class="absolute right-2 top-2 opacity-0 has-[:focus-visible]:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100"
+            {{ section.label }}
+          </h4>
+          <ul>
+            <li
+              v-for="version in section.versions"
+              :key="version.name"
+              :ref="(el) => setRowEl(version.name, el)"
+              :tabindex="version.name === tabStop ? 0 : -1"
+              :aria-expanded="isOpenable(version) ? openRows.has(version.name) : undefined"
+              class="group relative scroll-mt-8 rounded-6 px-3 py-2.5 before:absolute before:inset-x-3 before:top-0 before:border-t before:border-outline-gray-1 first:before:hidden hover:bg-surface-gray-2 hover:before:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3 focus-visible:before:hidden [&:focus-visible+li]:before:hidden [&:hover+li]:before:hidden"
+              :class="[
+                isClickable(version) && 'cursor-pointer',
+                flashName === version.name && '!bg-surface-gray-3',
+                fadeName === version.name && 'transition-colors duration-[1200ms]',
+              ]"
+              @click="activate(version)"
+              @focus="activeName = version.name"
+              @keydown="onRowKeydown($event, version)"
             >
-              <Dropdown align="end" :options="menuOptions(version, index)">
-                <Button
-                  aria-label="Version actions"
-                  icon="lucide-ellipsis"
-                  size="sm"
-                  variant="ghost"
-                />
-              </Dropdown>
-            </div>
-
-            <div class="pr-8">
-              <!-- A restore row names the version it went back to. -->
-              <p
-                v-if="version.kind === 'restore'"
-                class="flex items-center gap-2 text-p-base text-ink-gray-8"
+              <!--
+                Hidden until the row is hovered or focused, and held visible
+                while its menu is open (reka stamps `data-state="open"` on the
+                trigger). Line 1 reserves `pr-8` so the prompt never runs under
+                it. Only the active row's button is a tab stop.
+              -->
+              <div
+                v-if="menuOptions(version).length"
+                class="absolute right-2 top-2 opacity-0 group-focus-visible:opacity-100 has-[:focus-visible]:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100"
+                @click.stop
               >
-                <span class="min-w-0 truncate">
-                  {{
-                    restoreTarget(version)?.prompt ??
-                    `Version ${version.restored_from ?? version.sequence}`
-                  }}
-                </span>
-                <Badge label="Restored" class="shrink-0">
-                  <template #prefix>
-                    <span class="lucide-undo-2 size-full" aria-hidden="true" />
-                  </template>
-                </Badge>
-              </p>
+                <Dropdown align="end" :options="menuOptions(version)">
+                  <Button
+                    aria-label="Version actions"
+                    icon="lucide-ellipsis"
+                    size="sm"
+                    variant="ghost"
+                    :tabindex="version.name === tabStop ? 0 : -1"
+                  />
+                </Dropdown>
+              </div>
 
-              <p
-                v-else-if="version.kind === 'created'"
-                class="flex items-start gap-2 text-p-base text-ink-gray-7"
-              >
-                <span
-                  class="lucide-sparkles mt-0.5 size-4 shrink-0 text-ink-gray-5"
-                  aria-hidden="true"
-                />
-                <span class="min-w-0">{{ version.prompt }}</span>
-              </p>
-
-              <!-- A long prompt is its own toggle, so it needs no button. -->
-              <button
-                v-else-if="isLong(version)"
-                type="button"
-                class="w-full cursor-pointer whitespace-pre-line text-left text-p-base text-ink-gray-8"
-                :class="{ 'line-clamp-2': !openPrompts.has(version.name) }"
-                :aria-expanded="openPrompts.has(version.name)"
-                @click="openPrompts = toggle(openPrompts, version.name)"
-              >
-                {{ version.prompt }}
-              </button>
-              <p v-else class="whitespace-pre-line text-p-base text-ink-gray-8">
-                {{ version.prompt }}
-              </p>
-            </div>
-
-            <p class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-gray-5">
-              <template v-if="index === 0">
-                <span class="font-medium text-ink-gray-7">Current</span>
-                <span aria-hidden="true">&middot;</span>
-              </template>
-              <span :title="version.creation">{{ version.created }}</span>
-              <template v-if="version.changes.length">
-                <span aria-hidden="true">&middot;</span>
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-0.5 hover:text-ink-gray-7"
-                  :aria-expanded="openFiles.has(version.name)"
-                  @click="openFiles = toggle(openFiles, version.name)"
+              <div class="pr-8">
+                <!-- A restore row names the version it went back to. -->
+                <p
+                  v-if="version.kind === 'restore'"
+                  class="flex items-center gap-2 text-p-base text-ink-gray-8"
                 >
-                  {{ fileLabel(version.changes.length) }}
+                  <span class="min-w-0 truncate">
+                    {{
+                      restoreTarget(version)?.prompt ??
+                      `Version ${version.restored_from ?? version.sequence}`
+                    }}
+                  </span>
+                  <Badge label="Restored" class="shrink-0">
+                    <template #prefix>
+                      <span class="lucide-undo-2 size-full" aria-hidden="true" />
+                    </template>
+                  </Badge>
+                </p>
+
+                <p
+                  v-else-if="version.kind === 'created'"
+                  class="flex items-start gap-2 text-p-base text-ink-gray-7"
+                >
                   <span
-                    :class="[chevronFor(openFiles.has(version.name)), 'size-3']"
+                    class="lucide-sparkles mt-0.5 size-4 shrink-0 text-ink-gray-5"
                     aria-hidden="true"
                   />
-                </button>
-              </template>
-            </p>
+                  <span class="min-w-0">{{ version.prompt }}</span>
+                </p>
 
-            <PrototypeChangeList
-              v-if="openFiles.has(version.name)"
-              class="mt-2"
-              :changes="version.changes"
-            />
-          </li>
-        </ul>
+                <p
+                  v-else
+                  class="whitespace-pre-line text-p-base text-ink-gray-8"
+                  :class="{ 'line-clamp-2': isLong(version) && !openRows.has(version.name) }"
+                >
+                  {{ version.prompt }}
+                </p>
+              </div>
+
+              <p class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-gray-5">
+                <template v-if="version.name === currentName">
+                  <span class="font-medium text-ink-gray-7">Current</span>
+                  <span aria-hidden="true">&middot;</span>
+                </template>
+                <span :title="fullDate(version)">{{ timeLabel(version) }}</span>
+                <template v-if="version.kind === 'restore' && version.source === 'Agent'">
+                  <span aria-hidden="true">&middot;</span>
+                  <span>by agent</span>
+                </template>
+                <template v-if="version.changes.length">
+                  <span aria-hidden="true">&middot;</span>
+                  <span class="inline-flex items-center gap-0.5">
+                    {{ fileLabel(version.changes.length) }}
+                    <span
+                      class="lucide-chevron-right size-3 transition-transform"
+                      :class="{ 'rotate-90': openRows.has(version.name) }"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </template>
+              </p>
+
+              <PrototypeChangeList
+                v-if="version.kind !== 'restore' && openRows.has(version.name)"
+                class="mt-2"
+                :changes="version.changes"
+              />
+            </li>
+          </ul>
+        </section>
+        </template>
       </div>
 
       <!-- Only when a row lacks a snapshot, so most dialogs never show it. -->
