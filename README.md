@@ -46,7 +46,7 @@ sends no `Authorization` header.
 
 ## The tool surface
 
-Eighteen tools. Except for `get_skill`, `list_prototypes`, `list_runtimes`, and
+Twenty tools. Except for `get_skill`, `list_prototypes`, `list_runtimes`, and
 `create_prototype`, each tool takes the `prototype` slug.
 
 | Tool | What it does |

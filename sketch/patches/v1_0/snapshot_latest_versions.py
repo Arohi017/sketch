@@ -23,20 +23,34 @@ from sketch import prototype_files, snapshots, versions
 
 
 def execute():
-	for name in frappe.get_all("Sketch Prototype", pluck="name"):
-		if versions.pending(name) or not os.path.isdir(prototype_files.prototype_dir(name)):
-			continue
+	for index, name in enumerate(frappe.get_all("Sketch Prototype", pluck="name"), start=1):
+		try:
+			backfill(name)
+		except Exception:
+			# One bad Prototype (a full history, a disk error) must not stop the rest.
+			frappe.log_error(title=f"Snapshot backfill failed for {name}")
 
-		latest = frappe.db.get_value(
-			"Sketch Prototype Version",
-			{"prototype": name},
-			["name", "manifest"],
-			order_by="sequence desc",
-		)
-		if not latest or latest[1]:
-			continue
+		if index % 50 == 0:
+			frappe.db.commit()
 
-		manifest = snapshots.capture(name)
-		frappe.db.set_value(
-			"Sketch Prototype Version", latest[0], "manifest", json.dumps(manifest), update_modified=False
-		)
+
+def backfill(name: str) -> None:
+	if versions.pending(name) or not os.path.isdir(prototype_files.prototype_dir(name)):
+		return
+
+	latest = frappe.db.get_value(
+		"Sketch Prototype Version",
+		{"prototype": name},
+		["name", "manifest"],
+		order_by="sequence desc",
+	)
+	if not latest or latest[1]:
+		return
+
+	manifest = snapshots.capture(name)
+	frappe.db.set_value(
+		"Sketch Prototype Version",
+		latest[0],
+		{"manifest": json.dumps(manifest), "restorable": 1},
+		update_modified=False,
+	)
