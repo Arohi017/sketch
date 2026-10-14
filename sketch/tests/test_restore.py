@@ -149,7 +149,7 @@ class TestRestore(IntegrationTestCase):
 		new = {"a": "1", "b": "9", "d": "4"}
 
 		self.assertEqual(
-			snapshots.diff(old, new),
+			versions.diff(old, new),
 			[
 				{"path": "b", "action": versions.MODIFIED},
 				{"path": "c", "action": versions.DELETED},
@@ -216,8 +216,11 @@ class TestRestore(IntegrationTestCase):
 	def test_dry_run_writes_nothing(self):
 		first = self.save("first", write={"src/new.txt": "new\n"})
 		self.save("second", edit={"src/one.txt": ("one", "uno")})
+		with open(prototype_files.safe_join(self.doc.name, "src/one.txt"), "w") as handle:
+			handle.write("unsaved edit\n")
 		tree = self.tree()
 		rows = len(self.history())
+		blobs = self.blobs()
 
 		result = self.restore(first, dry_run=True)
 
@@ -225,7 +228,56 @@ class TestRestore(IntegrationTestCase):
 		self.assertEqual(result["files_modified"], 1)
 		self.assertNotIn("recorded", result)
 		self.assertEqual(self.tree(), tree)
+		self.assertEqual(self.blobs(), blobs)
 		self.assertEqual(len(self.history()), rows)
+
+	def test_a_failed_restore_puts_the_old_tree_back(self):
+		first = self.save("first", write={"src/new.txt": "new\n"})
+		self.save(
+			"second", write={"src/extra.txt": "x\n"}, edit={"src/one.txt": ("one", "uno")}, delete=["src/two.txt"]
+		)
+		before = self.tree()
+		real = snapshots._write_atomic
+		calls = []
+
+		def flaky(target, data):
+			calls.append(target)
+			if len(calls) == 2:
+				raise OSError("disk full")
+			return real(target, data)
+
+		with patch("sketch.snapshots._write_atomic", side_effect=flaky):
+			with self.assertRaises(OSError):
+				self.restore(first)
+
+		self.assertEqual(self.tree(), before)
+
+	def test_a_file_can_become_a_folder_and_back(self):
+		as_file = self.save("file", write={"src/utils": "export {}\n"})
+		tools.do_delete_file({"prototype": SLUG, "path": "src/utils"})
+		tools.do_write_files(
+			{"prototype": SLUG, "files": [{"path": "src/utils/index.ts", "content": "export {}\n"}]}
+		)
+		tools.do_commit({"prototype": SLUG, "prompt": "folder"})
+		as_folder = self.history()[0]["sequence"]
+
+		self.restore(as_file)
+		self.assertEqual(self.tree()["src/utils"], b"export {}\n")
+		self.assertNotIn("src/utils/index.ts", self.tree())
+
+		self.restore(as_folder)
+		self.assertEqual(self.tree()["src/utils/index.ts"], b"export {}\n")
+		self.assertNotIn("src/utils", self.tree())
+
+	def test_a_full_history_refuses_a_new_version_and_stores_nothing(self):
+		blobs = self.blobs()
+		tools.do_write_files({"prototype": SLUG, "files": [{"path": "src/big.txt", "content": "big\n"}]})
+
+		with patch.object(snapshots, "HISTORY_CAP_BYTES", 1):
+			with self.assertRaises(snapshots.HistoryFullError):
+				tools.do_commit({"prototype": SLUG, "prompt": "too much"})
+
+		self.assertEqual(self.blobs(), blobs)
 
 	def test_a_restore_that_changes_nothing_records_nothing(self):
 		first = self.save("first", write={"src/new.txt": "new\n"})
@@ -288,7 +340,11 @@ class TestRestore(IntegrationTestCase):
 	def test_history_says_restorable_and_never_returns_the_manifest(self):
 		first = self.save("first", write={"src/new.txt": "new\n"})
 		self.save("second", edit={"src/one.txt": ("one", "uno")})
-		frappe.db.set_value(versions.VERSION, {"prototype": self.doc.name, "sequence": first}, "manifest", "")
+		frappe.db.set_value(
+			versions.VERSION,
+			{"prototype": self.doc.name, "sequence": first},
+			{"manifest": "", "restorable": 0},
+		)
 
 		rows = self.history()
 
@@ -340,6 +396,19 @@ class TestRestore(IntegrationTestCase):
 				api.restore_version(SLUG, first)
 
 		self.assertEqual(self.tree()["src/one.txt"], b"uno\n")
+
+	def test_a_non_owner_cannot_restore_through_mcp(self):
+		first = self.save("first", write={"src/new.txt": "new\n"})
+		self.save("second", edit={"src/one.txt": ("one", "uno")})
+
+		with set_user(self.other):
+			reply = tools.call_tool("restore_version", {"prototype": SLUG, "sequence": first})
+
+		self.assertTrue(reply["isError"])
+		self.assertEqual(self.tree()["src/one.txt"], b"uno\n")
+
+	def test_restore_version_is_marked_destructive(self):
+		self.assertIn("restore_version", tools.DESTRUCTIVE)
 
 	# ------------------------------------------------------------------- mcp
 
@@ -439,5 +508,52 @@ class TestCreatedVersions(IntegrationTestCase):
 
 			api.delete_prototype(row["slug"])
 
+		# The blobs go once the delete commits, so a rolled back delete keeps them.
+		frappe.db.commit()
+
 		self.assertFalse(os.path.exists(store))
 		self.assertEqual(frappe.db.count(versions.VERSION, {"prototype": row["name"]}), 0)
+
+
+class TestSnapshotBackfill(IntegrationTestCase):
+	"""The patch gives the latest version of each Prototype a manifest."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		utils.require_runtime()
+		cls.owner = utils.make_user("rstbkf", "d2trstbkf")
+		cls.addClassCleanup(utils.drop_user, cls.owner)
+
+	def make(self, slug):
+		doc = utils.make_prototype(self.owner, slug, files=SEED)
+		self.addCleanup(utils.drop_prototype, doc.name)
+		row = versions.record(doc, versions.REQUEST, "old", [], {})
+		frappe.db.set_value(versions.VERSION, row.name, {"manifest": "", "restorable": 0})
+		return doc
+
+	def latest(self, doc):
+		return versions.history(doc.name)[0]
+
+	def test_the_latest_version_becomes_restorable_and_a_second_run_is_a_no_op(self):
+		from sketch.patches.v1_0 import snapshot_latest_versions
+
+		doc = self.make("d2t-backfill")
+		self.assertFalse(self.latest(doc)["restorable"])
+
+		snapshot_latest_versions.execute()
+		self.assertTrue(self.latest(doc)["restorable"])
+		stamp = frappe.db.get_value(versions.VERSION, {"prototype": doc.name}, "manifest")
+
+		snapshot_latest_versions.execute()
+		self.assertEqual(frappe.db.get_value(versions.VERSION, {"prototype": doc.name}, "manifest"), stamp)
+
+	def test_a_prototype_with_pending_changes_is_skipped(self):
+		from sketch.patches.v1_0 import snapshot_latest_versions
+
+		doc = self.make("d2t-backfill-pending")
+		versions.note(doc.name, "src/one.txt", versions.MODIFIED)
+
+		snapshot_latest_versions.execute()
+
+		self.assertFalse(self.latest(doc)["restorable"])

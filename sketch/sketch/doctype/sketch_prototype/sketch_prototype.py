@@ -31,13 +31,16 @@ class SketchPrototype(Document):
 		(`sketch/snapshots.py`) live outside the tree, so they need their own
 		lines.
 		"""
+		from functools import partial
+
 		from sketch import snapshots, thumbnails
 		from sketch.prototype_files import delete_tree
 
 		frappe.db.delete("Sketch Prototype Version", {"prototype": self.name})
 		delete_tree(self.name)
 		thumbnails.forget(self.name)
-		snapshots.forget(self.name)
+		# After the commit, so a delete that rolls back keeps its history.
+		frappe.db.after_commit.add(partial(snapshots.forget, self.name))
 
 
 def on_doctype_update():

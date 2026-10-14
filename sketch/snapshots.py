@@ -33,12 +33,19 @@ import zlib
 
 import frappe
 
-from sketch import prototype_files, versions
+from sketch import prototype_files
 
 #: `private/files/sketch-snapshots`, under the site path.
 ROOT = ("private", "files", "sketch-snapshots")
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
+
+#: Most compressed bytes one Prototype's history may hold. Blobs are never pruned.
+HISTORY_CAP_BYTES = 200 * 1024 * 1024
+
+
+class HistoryFullError(frappe.ValidationError):
+	"""The history store is at its cap, so no new version can be captured."""
 
 
 def store_dir(name: str) -> str:
@@ -53,74 +60,105 @@ def store_dir(name: str) -> str:
 	return os.path.abspath(frappe.get_site_path(*ROOT, name))
 
 
+def manifest(name: str) -> dict[str, str]:
+	"""The manifest {path: sha} of the tree on disk. Stores nothing."""
+	return {rel: _sha(data) for rel, data in _scan(name)}
+
+
 def capture(name: str) -> dict[str, str]:
 	"""Store every file of the tree and return its manifest {path: sha}.
 
-	A blob already stored is not written again, which is the dedup.
+	A blob already stored is not written again, which is the dedup. Raises
+	HistoryFullError, before writing anything, when the new blobs would push
+	the store over `HISTORY_CAP_BYTES`.
 	"""
-	manifest = {}
+	result = {}
+	fresh = {}
 	for rel, data in _scan(name):
 		sha = _sha(data)
-		_store(name, sha, data)
-		manifest[rel] = sha
+		result[rel] = sha
+		if sha not in fresh and not os.path.exists(_blob_path(name, sha)):
+			fresh[sha] = zlib.compress(data)
 
-	return manifest
+	added = sum(len(blob) for blob in fresh.values())
+	if fresh and _store_size(name) + added > HISTORY_CAP_BYTES:
+		frappe.throw(
+			frappe._(
+				"This prototype's version history is full ({0}). Fork it to keep saving versions with a fresh history."
+			).format(f"{HISTORY_CAP_BYTES // (1024 * 1024)} MB"),
+			HistoryFullError,
+		)
+
+	for sha, blob in fresh.items():
+		_write_atomic(_blob_path(name, sha), blob)
+
+	return result
 
 
 def read_blob(name: str, sha: str) -> bytes:
 	"""The bytes behind one hash. Raises ValidationError when the blob is gone."""
 	try:
 		with open(_blob_path(name, sha), "rb") as handle:
-			return zlib.decompress(handle.read())
+			data = zlib.decompress(handle.read())
 	except (OSError, zlib.error):
+		data = None
+
+	if data is None or _sha(data) != sha:
 		frappe.throw(
-			frappe._("A file of this version is missing from the snapshot store"),
+			frappe._("A file of this version can't be restored. It is missing or damaged in the snapshot store."),
 			frappe.ValidationError,
 		)
 
-
-def diff(old: dict, new: dict) -> list[dict]:
-	"""The rows that take the tree `old` to the tree `new`, sorted by path.
-
-	Each row is {"path", "action"}, in the shape `versions` already stores.
-	"""
-	rows = []
-	for path in sorted(set(old) | set(new)):
-		if path not in old:
-			rows.append({"path": path, "action": versions.ADDED})
-		elif path not in new:
-			rows.append({"path": path, "action": versions.DELETED})
-		elif old[path] != new[path]:
-			rows.append({"path": path, "action": versions.MODIFIED})
-
-	return rows
+	return data
 
 
-def apply(name: str, manifest: dict) -> None:
-	"""Make the tree on disk equal `manifest`.
+def apply(name: str, target: dict, current: dict) -> None:
+	"""Make the tree on disk equal `target`. `current` is the tree now.
 
 	Only a path that differs or is missing is written, and it gets a fresh
 	mtime, so `revision()` moves and the open Viewer reloads. A path outside
-	the manifest is deleted, then the folders that leaves empty.
+	the target is deleted, then the folders that leaves empty.
 
 	Deletes run before writes: a file that must become a folder (or the
 	reverse) needs its old shape gone first.
 
 	No `preflight`. The target tree passed the quotas when it was written.
-	Every blob is read before the first change, so a missing one stops the
-	restore with the tree untouched.
+	Every path is resolved and every blob read before the first change, so a
+	bad one stops the restore with the tree untouched. If a change fails
+	half way, the tree `current` is put back (its blobs are in the store,
+	because the caller captured it) and the first error is raised.
 	"""
-	current = {rel: _sha(data) for rel, data in _scan(name)}
-	wanted = {path: sha for path, sha in manifest.items() if current.get(path) != sha}
-	blobs = {path: read_blob(name, sha) for path, sha in wanted.items()}
+	plan = _plan(name, target, current)
+	try:
+		_run(name, plan)
+	except BaseException:
+		try:
+			_run(name, _plan(name, current, target))
+		except Exception:
+			frappe.log_error(title=f"Restore rollback failed for {name}")
+		raise
 
-	for path in sorted(set(current) - set(manifest)):
-		absolute = prototype_files.safe_join(name, path)
-		os.remove(absolute)
-		prototype_files._prune_empty_dirs(name, os.path.dirname(absolute))
 
-	for path, data in blobs.items():
-		_write_atomic(prototype_files.safe_join(name, path), data)
+def _plan(name: str, target: dict, current: dict):
+	"""(paths to delete, {path: bytes} to write), all resolved up front."""
+	deletes = [prototype_files.safe_join(name, path) for path in sorted(set(current) - set(target))]
+	writes = {
+		prototype_files.safe_join(name, path): read_blob(name, sha)
+		for path, sha in target.items()
+		if current.get(path) != sha
+	}
+	return deletes, writes
+
+
+def _run(name: str, plan) -> None:
+	deletes, writes = plan
+	for absolute in deletes:
+		if os.path.exists(absolute):
+			os.remove(absolute)
+			prototype_files._prune_empty_dirs(name, os.path.dirname(absolute))
+
+	for absolute, data in writes.items():
+		_write_atomic(absolute, data)
 
 
 def forget(name: str) -> None:
@@ -146,6 +184,15 @@ def _scan(name: str):
 
 def _sha(data: bytes) -> str:
 	return hashlib.sha256(data).hexdigest()
+
+
+def _store_size(name: str) -> int:
+	"""Bytes the blobs of this Prototype take on disk."""
+	total = 0
+	for folder, _dirs, files in os.walk(store_dir(name)):
+		total += sum(os.path.getsize(os.path.join(folder, entry)) for entry in files)
+
+	return total
 
 
 def _blob_path(name: str, sha: str) -> str:

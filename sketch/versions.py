@@ -27,7 +27,6 @@ import json
 
 import frappe
 from frappe.query_builder import Order
-from frappe.query_builder.functions import IfNull
 
 from sketch import snapshots, thumbnails
 
@@ -41,6 +40,15 @@ VERSION = "Sketch Prototype Version"
 REQUEST = "Request"
 RESTORE = "Restore"
 CREATED = "Created"
+
+
+def lock(name: str) -> None:
+	"""Hold the Prototype row until this transaction ends.
+
+	Every writer of the tree takes it first, so a write waits for a restore
+	(or a commit) in flight and never lands in the middle of one.
+	"""
+	frappe.db.get_value(PROTOTYPE, name, "name", for_update=True)
 
 
 def note(name: str, path: str, action: str) -> None:
@@ -107,10 +115,9 @@ def commit(doc, prompt: str, summary: str | None = None):
 	if not (prompt or "").strip():
 		frappe.throw(frappe._("A version needs the user prompt"), frappe.ValidationError)
 
-	# Hold the Prototype row until this transaction ends. Two commits on one
-	# Prototype then queue here, so they cannot read the same pending list or
-	# the same maximum sequence and write two rows for one request.
-	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
+	# Two commits on one Prototype queue here, so they cannot read the same
+	# pending list or the same maximum sequence and write two rows for one request.
+	lock(doc.name)
 
 	changes = pending(doc.name)
 	if not changes:
@@ -147,6 +154,7 @@ def record(
 	version.summary = summary
 	version.changes = json.dumps(changes)
 	version.manifest = json.dumps(manifest)
+	version.restorable = 1 if manifest else 0
 	version.files_added = _count(changes, ADDED)
 	version.files_modified = _count(changes, MODIFIED)
 	version.files_deleted = _count(changes, DELETED)
@@ -163,9 +171,9 @@ def record_created(doc, prompt: str):
 	Called by create and fork once the tree is written, so a restore can always
 	go back to how the Prototype began.
 	"""
-	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
+	lock(doc.name)
 	manifest = snapshots.capture(doc.name)
-	return record(doc, CREATED, prompt, snapshots.diff({}, manifest), manifest)
+	return record(doc, CREATED, prompt, diff({}, manifest), manifest)
 
 
 def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> dict:
@@ -180,21 +188,23 @@ def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> d
 	that would change. A restore that would change nothing records nothing.
 	`source` says who asked: "App" for the Sketch UI, "Agent" for the MCP tool.
 	"""
-	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
-
 	target = _manifest_of(doc.name, sequence)
-	changes = snapshots.diff(snapshots.capture(doc.name), target)
-	result = {"sequence": sequence, "changes": changes, **_counts(changes)}
 	if dry_run:
-		return result
+		changes = diff(snapshots.manifest(doc.name), target)
+		return {"sequence": sequence, "changes": changes, **_counts(changes)}
 
-	if not changes:
-		return {**result, "recorded": False}
-
+	lock(doc.name)
 	if pending(doc.name):
 		commit(doc, f"Unsaved changes, kept before restoring version {sequence}")
 
-	snapshots.apply(doc.name, target)
+	# Stored now, so the tree being replaced can always be put back.
+	current = snapshots.capture(doc.name)
+	changes = diff(current, target)
+	result = {"sequence": sequence, "changes": changes, **_counts(changes)}
+	if not changes:
+		return {**result, "recorded": False}
+
+	snapshots.apply(doc.name, target, current)
 	version = record(
 		doc,
 		RESTORE,
@@ -239,7 +249,7 @@ def history(name: str) -> list[dict]:
 			table.files_modified,
 			table.files_deleted,
 			table.creation,
-			(IfNull(table.manifest, "") != "").as_("restorable"),
+			table.restorable,
 		)
 		.where(table.prototype == name)
 		.orderby(table.sequence, order=Order.desc)
@@ -330,6 +340,23 @@ def _manifest_of(name: str, sequence: int) -> dict:
 		)
 
 	return manifest
+
+
+def diff(old: dict, new: dict) -> list[dict]:
+	"""The rows that take the tree `old` to the tree `new`, sorted by path.
+
+	Each row is {"path", "action"}, in the shape this module already stores.
+	"""
+	rows = []
+	for path in sorted(set(old) | set(new)):
+		if path not in old:
+			rows.append({"path": path, "action": ADDED})
+		elif path not in new:
+			rows.append({"path": path, "action": DELETED})
+		elif old[path] != new[path]:
+			rows.append({"path": path, "action": MODIFIED})
+
+	return rows
 
 
 def _counts(changes: list[dict]) -> dict:

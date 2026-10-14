@@ -15,7 +15,7 @@ import os
 from datetime import UTC, datetime
 
 import frappe
-from frappe.utils import convert_utc_to_system_timezone, pretty_date
+from frappe.utils import cint, convert_utc_to_system_timezone, pretty_date
 
 from sketch import annotations, checkd, prototype, prototype_files, signature, thumbnail, thumbnails, versions
 from sketch.sketch.doctype.sketch_token import sketch_token
@@ -496,7 +496,11 @@ def restore_version(slug: str, sequence: int, dry_run: int = 0) -> dict:
 	would change. See `versions.restore` for the answer.
 	"""
 	doc = prototype.resolve_owned(slug)
-	return versions.restore(doc, int(sequence), bool(int(dry_run)), source="App")
+	sequence = cint(sequence)
+	if sequence < 1:
+		frappe.throw(frappe._("sequence must be a version number, 1 or more"), frappe.ValidationError)
+
+	return versions.restore(doc, sequence, bool(cint(dry_run)), source="App")
 
 
 @frappe.whitelist()

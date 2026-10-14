@@ -65,7 +65,7 @@ READ_ONLY = {
 	"list_versions",
 }
 
-DESTRUCTIVE = {"delete_file", "set_public"}
+DESTRUCTIVE = {"delete_file", "set_public", "restore_version"}
 
 
 def annotations(name: str) -> dict:
@@ -286,6 +286,7 @@ def do_read_files(args: dict) -> ToolResult:
 
 def do_write_files(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	files = args.get("files")
 	if not isinstance(files, list) or not files:
 		frappe.throw(frappe._("files must be a list of {path, content} objects"))
@@ -305,6 +306,7 @@ def do_write_files(args: dict) -> ToolResult:
 
 def do_edit_file(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args.get("path")
 	old_string = args.get("old_string")
 	new_string = args.get("new_string")
@@ -319,6 +321,7 @@ def do_edit_file(args: dict) -> ToolResult:
 def do_upload_asset(args: dict) -> ToolResult:
 	"""Keep images inside the existing source tree and permission boundary."""
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args["path"]
 	if not path.startswith("src/assets/") or not path.endswith(".js"):
 		frappe.throw("path must be a JavaScript module under src/assets/, such as src/assets/logo.js")
@@ -333,6 +336,7 @@ def do_upload_asset(args: dict) -> ToolResult:
 
 def do_edit_files(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	paths = prototype_files.edit_files(doc.name, args["edits"])
 	versions.note_write(doc.name, paths, set(paths))
 	return ToolResult(text=f"Edited {len(paths)} file(s): {', '.join(paths)}")
@@ -340,6 +344,7 @@ def do_edit_files(args: dict) -> ToolResult:
 
 def do_delete_file(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args.get("path")
 	if not path:
 		frappe.throw(frappe._("path is required"))
