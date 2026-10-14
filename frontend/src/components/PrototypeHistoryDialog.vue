@@ -557,8 +557,7 @@ function fileLabel(count: number): string {
                 >
                   <span class="min-w-0 truncate">
                     {{
-                      restoreTarget(version)?.prompt ??
-                      `Version ${version.restored_from ?? version.sequence}`
+                      restoreTarget(version)?.prompt ?? version.prompt
                     }}
                   </span>
                   <Badge label="Restored" class="shrink-0">

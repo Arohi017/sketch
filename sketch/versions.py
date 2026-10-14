@@ -205,10 +205,13 @@ def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> d
 		return {**result, "recorded": False}
 
 	snapshots.apply(doc.name, target, current)
+	# The restore row keeps the prompt it went back to, so it still reads right
+	# once older versions are deleted. A restore of a restore copies the name on.
+	prompt = frappe.db.get_value(VERSION, {"prototype": doc.name, "sequence": sequence}, "prompt")
 	version = record(
 		doc,
 		RESTORE,
-		f"Restored version {sequence}",
+		prompt or f"Version {sequence}",
 		changes,
 		target,
 		restored_from=sequence,
