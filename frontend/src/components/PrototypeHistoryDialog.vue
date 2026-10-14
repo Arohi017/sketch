@@ -23,7 +23,7 @@
  * loaded states all have the same size and the dialog never jumps.
  */
 import { computed, ref, watch } from 'vue'
-import { Button, Dialog, Dropdown, ErrorMessage, LoadingText, toast, useCall } from 'frappe-ui'
+import { Badge, Button, Dialog, Dropdown, ErrorMessage, LoadingText, toast, useCall } from 'frappe-ui'
 import PrototypeChangeList from './PrototypeChangeList.vue'
 import PrototypeRestoreDialog from './PrototypeRestoreDialog.vue'
 import { method } from '../store'
@@ -264,23 +264,19 @@ function fileLabel(count: number): string {
               <!-- A restore row names the version it went back to. -->
               <p
                 v-if="version.kind === 'restore'"
-                class="flex items-start gap-2 text-p-base text-ink-gray-5"
+                class="flex items-center gap-2 text-p-base text-ink-gray-8"
               >
-                <span
-                  class="lucide-undo-2 mt-0.5 size-4 shrink-0 text-ink-gray-5"
-                  aria-hidden="true"
-                />
-                <span class="line-clamp-1 min-w-0">
-                  <template v-if="restoreTarget(version)">
-                    Restored to:
-                    <span class="text-ink-gray-7"
-                      >&ldquo;{{ restoreTarget(version)?.prompt }}&rdquo;</span
-                    >
-                  </template>
-                  <template v-else
-                    >Restored version {{ version.restored_from ?? version.sequence }}</template
-                  >
+                <span class="min-w-0 truncate">
+                  {{
+                    restoreTarget(version)?.prompt ??
+                    `Version ${version.restored_from ?? version.sequence}`
+                  }}
                 </span>
+                <Badge label="Restored" class="shrink-0">
+                  <template #prefix>
+                    <span class="lucide-undo-2 size-full" aria-hidden="true" />
+                  </template>
+                </Badge>
               </p>
 
               <p
