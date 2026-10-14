@@ -135,9 +135,7 @@ const needle = computed(() => query.value.trim().toLowerCase())
 
 function matches(version: PrototypeVersion): boolean {
   if (version.prompt.toLowerCase().includes(needle.value)) return true
-  if (`version ${version.sequence}`.includes(needle.value) || `v${version.sequence}` === needle.value) return true
-  if (version.kind !== 'restore') return false
-  return restoreTarget(version)?.prompt.toLowerCase().includes(needle.value) ?? false
+  return `version ${version.sequence}`.includes(needle.value) || `v${version.sequence}` === needle.value
 }
 
 const visible = computed(() => {
@@ -243,22 +241,8 @@ function isLong(version: PrototypeVersion): boolean {
   return version.prompt.split('\n').length > CLAMP_LINES || version.prompt.length > CLAMP_CHARS
 }
 
-/** Every version by sequence. One map for the targets and the search. */
+/** Every version by sequence, for the jump from a restore row. */
 const bySequence = computed(() => new Map((history.data ?? []).map((row) => [row.sequence, row])))
-
-/**
- * The version a restore row points at. A restore of a restore follows
- * `restored_from` down to a version the agent actually wrote. It always ends:
- * `restored_from` is lower than the row's own sequence. Null when a row on the
- * way is gone.
- */
-function restoreTarget(version: PrototypeVersion): PrototypeVersion | null {
-  let target = version.restored_from == null ? undefined : bySequence.value.get(version.restored_from)
-  while (target?.kind === 'restore') {
-    target = target.restored_from == null ? undefined : bySequence.value.get(target.restored_from)
-  }
-  return target ?? null
-}
 
 /** The row a restore row jumps to: the one whose sequence it restored. */
 function jumpTarget(version: PrototypeVersion): PrototypeVersion | null {

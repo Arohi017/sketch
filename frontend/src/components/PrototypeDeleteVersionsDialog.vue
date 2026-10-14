@@ -66,7 +66,7 @@ async function confirm(): Promise<void> {
       dry_run: 0,
     })
     open.value = false
-    emit('deleted', result)
+    if (result) emit('deleted', result)
   } catch (error) {
     failure.value = (error as Error).message
   }

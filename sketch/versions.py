@@ -204,7 +204,8 @@ def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> d
 	if not changes:
 		return {**result, "recorded": False}
 
-	snapshots.apply(doc.name, target, current)
+	# The row goes in before the disk changes. If `apply` fails it puts the old
+	# tree back and raises, and the rollback takes the row with it.
 	version = record(
 		doc,
 		RESTORE,
@@ -214,6 +215,7 @@ def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> d
 		restored_from=sequence,
 		source=source,
 	)
+	snapshots.apply(doc.name, target, current)
 	thumbnails.request_refresh(doc.name)
 	return {
 		**result,
@@ -231,7 +233,7 @@ def prune(doc, sequence: int, dry_run: bool = False) -> dict:
 	{"deleted": rows, "freed_bytes": bytes}. With `dry_run` nothing is removed.
 	"""
 	if not dry_run:
-		lock(doc.name)
+		_lock_fresh(doc.name)
 
 	latest = frappe.db.sql(
 		"select max(sequence) from `tabSketch Prototype Version` where prototype = %s", doc.name
@@ -242,18 +244,37 @@ def prune(doc, sequence: int, dry_run: bool = False) -> dict:
 		)
 
 	deleted = frappe.db.count(VERSION, {"prototype": doc.name, "sequence": ["<=", sequence]})
-	keep = set(snapshots.manifest(doc.name).values())
+	if dry_run:
+		freed = snapshots.collect(doc.name, _kept_blobs(doc.name, sequence), dry_run=True)
+		return {"deleted": deleted, "freed_bytes": freed}
+
+	# Rows go first and are committed, so a failure from here on leaves only
+	# orphan blobs, which the next prune clears. Never a row without its blobs.
+	frappe.db.delete(VERSION, {"prototype": doc.name, "sequence": ["<=", sequence]})
+	_lock_fresh(doc.name)
+	freed = snapshots.collect(doc.name, _kept_blobs(doc.name, sequence))
+	return {"deleted": deleted, "freed_bytes": freed}
+
+
+def _kept_blobs(name: str, sequence: int) -> set[str]:
+	"""Blobs a prune must keep: the tree on disk and every version after `sequence`."""
+	keep = set(snapshots.manifest(name).values())
 	for raw in frappe.get_all(
-		VERSION, filters={"prototype": doc.name, "sequence": [">", sequence]}, pluck="manifest"
+		VERSION, filters={"prototype": name, "sequence": [">", sequence]}, pluck="manifest"
 	):
 		keep.update(_parse_manifest(raw).values())
+	return keep
 
-	freed = snapshots.collect(doc.name, keep, dry_run=True)
-	if not dry_run:
-		frappe.db.delete(VERSION, {"prototype": doc.name, "sequence": ["<=", sequence]})
-		snapshots.collect(doc.name, keep)
 
-	return {"deleted": deleted, "freed_bytes": freed}
+def _lock_fresh(name: str) -> None:
+	"""Commit, then lock, so the reads that follow see every commit before the lock.
+
+	MariaDB's repeatable read keeps a request's first snapshot even after a
+	`for update`. A prune reading through that stale snapshot could miss a
+	version committed while it waited, and collect that version's blobs.
+	"""
+	frappe.db.commit()
+	lock(name)
 
 
 def history(name: str) -> list[dict]:

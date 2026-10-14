@@ -75,7 +75,7 @@ Use list_runtimes to find installed frappe-ui versions and set_runtime to change
 
 TypeScript is stripped, not type-checked. Tailwind classes, frappe-ui components and frappe-ui tokens all work; get_skill documents them.
 
-The optional hosted check verifies rendering, not interactions. It returns errors, visited and skipped routes, and labeled screenshots. Set routes to concrete paths, viewport to width and height, and full_page to true for mobile or long-page checks. Fix every error before you report done. delete_file and set_public are annotated destructive, so your client asks before running them."""
+The optional hosted check verifies rendering, not interactions. It returns errors, visited and skipped routes, and labeled screenshots. Set routes to concrete paths, viewport to width and height, and full_page to true for mobile or long-page checks. Fix every error before you report done. delete_file, set_public and restore_version are annotated destructive, so your client asks before running them."""
 
 
 class RpcError(Exception):

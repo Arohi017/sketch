@@ -228,15 +228,6 @@ def _blob_path(name: str, sha: str) -> str:
 	return os.path.join(store_dir(name), sha[:2], sha)
 
 
-def _store(name: str, sha: str, data: bytes) -> None:
-	"""Write one blob unless it is already there."""
-	target = _blob_path(name, sha)
-	if os.path.exists(target):
-		return
-
-	_write_atomic(target, zlib.compress(data))
-
-
 def _write_atomic(target: str, data: bytes) -> None:
 	"""Write beside the target, then rename over it.
 
