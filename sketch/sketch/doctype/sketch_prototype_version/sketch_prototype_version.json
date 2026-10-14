@@ -11,6 +11,7 @@
   "sequence",
   "kind",
   "restored_from",
+  "source",
   "prompt",
   "summary",
   "changes",
@@ -51,6 +52,13 @@
    "fieldname": "restored_from",
    "fieldtype": "Int",
    "label": "Restored From",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "\nApp\nAgent",
    "read_only": 1
   },
   {
@@ -102,7 +110,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-14 00:00:00.000000",
+ "modified": "2026-10-14 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Sketch",
  "name": "Sketch Prototype Version",

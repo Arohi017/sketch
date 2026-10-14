@@ -119,6 +119,8 @@ export interface PrototypeVersion {
   kind: 'request' | 'restore' | 'created'
   /** On a restore row, the `sequence` it restored. Null on every other row. */
   restored_from: number | null
+  /** On a restore row, who asked: the Sketch UI or the agent. Null otherwise. */
+  source: 'App' | 'Agent' | null
   /**
    * False for a row recorded before the server kept snapshots. Such a row has
    * nothing to go back to, so it gets no Restore button.

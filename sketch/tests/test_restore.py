@@ -321,6 +321,16 @@ class TestRestore(IntegrationTestCase):
 		self.assertTrue(real["recorded"])
 		self.assertEqual(self.tree()["src/one.txt"], b"one\n")
 
+	def test_an_api_restore_records_the_app_as_its_source(self):
+		first = self.save("first", write={"src/new.txt": "new\n"})
+		self.save("second", edit={"src/one.txt": ("one", "uno")})
+
+		api.restore_version(SLUG, first)
+
+		rows = api.list_versions(SLUG)
+		self.assertEqual(rows[0]["source"], "App")
+		self.assertIsNone(rows[1]["source"])
+
 	def test_a_non_owner_cannot_restore(self):
 		first = self.save("first", write={"src/new.txt": "new\n"})
 		self.save("second", edit={"src/one.txt": ("one", "uno")})
@@ -349,6 +359,16 @@ class TestRestore(IntegrationTestCase):
 		done = tools.call_tool("restore_version", {"prototype": SLUG, "sequence": first})
 		self.assertEqual(done["structuredContent"]["restored_from"], first)
 		self.assertEqual(self.tree()["src/one.txt"], b"one\n")
+
+	def test_an_mcp_restore_records_the_agent_as_its_source(self):
+		first = self.save("first", write={"src/new.txt": "new\n"})
+		self.save("second", edit={"src/one.txt": ("one", "uno")})
+
+		tools.call_tool("restore_version", {"prototype": SLUG, "sequence": first})
+
+		rows = api.list_versions(SLUG)
+		self.assertEqual(rows[0]["source"], "Agent")
+		self.assertIsNone(rows[1]["source"])
 
 	def test_the_mcp_list_text_is_capped_at_thirty_rows(self):
 		for index in range(32):

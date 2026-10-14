@@ -477,6 +477,7 @@ def list_versions(slug: str) -> list[dict]:
 				"files_deleted": row.get("files_deleted") or 0,
 				"kind": (row.get("kind") or "Request").lower(),
 				"restored_from": row.get("restored_from") or None,
+				"source": row.get("source") or None,
 				"restorable": bool(row.get("restorable")),
 				"creation": str(row.get("creation") or ""),
 				"created": pretty_date(row.get("creation")) if row.get("creation") else "",
@@ -495,7 +496,7 @@ def restore_version(slug: str, sequence: int, dry_run: int = 0) -> dict:
 	would change. See `versions.restore` for the answer.
 	"""
 	doc = prototype.resolve_owned(slug)
-	return versions.restore(doc, int(sequence), bool(int(dry_run)))
+	return versions.restore(doc, int(sequence), bool(int(dry_run)), source="App")
 
 
 @frappe.whitelist()

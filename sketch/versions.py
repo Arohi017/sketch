@@ -129,6 +129,7 @@ def record(
 	manifest: dict,
 	restored_from: int | None = None,
 	summary: str | None = None,
+	source: str | None = None,
 ):
 	"""Insert one version row. Returns the version doc.
 
@@ -141,6 +142,7 @@ def record(
 	version.sequence = _next_sequence(doc.name)
 	version.kind = kind
 	version.restored_from = restored_from
+	version.source = source
 	version.prompt = prompt
 	version.summary = summary
 	version.changes = json.dumps(changes)
@@ -166,7 +168,7 @@ def record_created(doc, prompt: str):
 	return record(doc, CREATED, prompt, snapshots.diff({}, manifest), manifest)
 
 
-def restore(doc, sequence: int, dry_run: bool = False) -> dict:
+def restore(doc, sequence: int, dry_run: bool = False, source: str = "App") -> dict:
 	"""Put the tree back as it was after version `sequence`.
 
 	The restore is recorded as a new version, so history only grows and a
@@ -176,6 +178,7 @@ def restore(doc, sequence: int, dry_run: bool = False) -> dict:
 	Raises frappe.ValidationError for a version that does not exist or that was
 	recorded before manifests did. With `dry_run` it only reports the files
 	that would change. A restore that would change nothing records nothing.
+	`source` says who asked: "App" for the Sketch UI, "Agent" for the MCP tool.
 	"""
 	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
 
@@ -193,7 +196,13 @@ def restore(doc, sequence: int, dry_run: bool = False) -> dict:
 
 	snapshots.apply(doc.name, target)
 	version = record(
-		doc, RESTORE, f"Restored version {sequence}", changes, target, restored_from=sequence
+		doc,
+		RESTORE,
+		f"Restored version {sequence}",
+		changes,
+		target,
+		restored_from=sequence,
+		source=source,
 	)
 	thumbnails.request_refresh(doc.name)
 	return {
@@ -222,6 +231,7 @@ def history(name: str) -> list[dict]:
 			table.sequence,
 			table.kind,
 			table.restored_from,
+			table.source,
 			table.prompt,
 			table.summary,
 			table.changes,

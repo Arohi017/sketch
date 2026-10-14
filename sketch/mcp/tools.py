@@ -426,7 +426,7 @@ def version_line(row: dict) -> str:
 def do_restore_version(args: dict) -> ToolResult:
 	"""Restore the files to how they were after an earlier version."""
 	doc = owned(args)
-	result = versions.restore(doc, args["sequence"], bool(args.get("dry_run")))
+	result = versions.restore(doc, args["sequence"], bool(args.get("dry_run")), source="Agent")
 	counts = "{0} added, {1} changed, {2} deleted".format(
 		result["files_added"], result["files_modified"], result["files_deleted"]
 	)
