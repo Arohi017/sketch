@@ -170,3 +170,15 @@ export interface AgentToken {
   /** See `SketchSession.last_used_pretty`. */
   last_used_pretty?: string | null
 }
+
+/** `sketch.api.delete_versions`, dry run or not. */
+export interface PruneResult {
+  deleted: number
+  freed_bytes: number
+}
+
+/** `sketch.api.history_usage`: bytes the history takes, and the most it may take. */
+export interface HistoryUsage {
+  used_bytes: number
+  cap_bytes: number
+}

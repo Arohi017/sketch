@@ -30,9 +30,10 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Badge, Button, Dialog, Dropdown, ErrorMessage, LoadingText, TextInput, toast, useCall } from 'frappe-ui'
 import PrototypeChangeList from './PrototypeChangeList.vue'
+import PrototypeDeleteVersionsDialog from './PrototypeDeleteVersionsDialog.vue'
 import PrototypeRestoreDialog from './PrototypeRestoreDialog.vue'
 import { method } from '../store'
-import type { Prototype, PrototypeVersion, RestoreResult } from '../types'
+import type { HistoryUsage, Prototype, PrototypeVersion, PruneResult, RestoreResult } from '../types'
 
 /** A prompt past this many lines or characters is clamped to two lines. */
 const CLAMP_LINES = 2
@@ -61,6 +62,12 @@ const history = useCall<PrototypeVersion[], { slug: string }>({
   initialData: [],
 })
 
+const usage = useCall<HistoryUsage, { slug: string }>({
+  url: method('history_usage'),
+  params: () => ({ slug: props.prototype.slug }),
+  immediate: false,
+})
+
 // Same method as the confirm step, with the dry run off. Undo needs no preview:
 // it puts back the tree the person was just looking at, as a new version.
 const undoRestore = useCall<RestoreResult, { slug: string; sequence: number; dry_run: 0 }>({
@@ -72,6 +79,9 @@ const undoRestore = useCall<RestoreResult, { slug: string; sequence: number; dry
 /** The version the confirm step is about. Kept after close, for the fade. */
 const restoring = ref<PrototypeVersion | null>(null)
 const confirmOpen = ref(false)
+/** The version the delete step is about. Kept after close, for the fade. */
+const pruning = ref<PrototypeVersion | null>(null)
+const pruneOpen = ref(false)
 
 /** Versions that are open (full prompt and file list), by version name. */
 const openRows = ref<Set<string>>(new Set())
@@ -95,6 +105,7 @@ watch(open, (value) => {
   query.value = ''
   activeName.value = null
   history.reload()
+  usage.reload()
 })
 
 onBeforeUnmount(clearFlash)
@@ -150,12 +161,39 @@ const tabStop = computed(() => {
   return rows.some((row) => row.name === activeName.value) ? activeName.value : rows[0]?.name
 })
 
+/** Share of the cap the history uses, where the footer and the delete item start. */
+const NEARLY_FULL = 0.8
+
+const nearlyFull = computed(() => {
+  const data = usage.data
+  return !!data && data.used_bytes >= data.cap_bytes * NEARLY_FULL
+})
+const isFull = computed(() => !!usage.data && usage.data.used_bytes >= usage.data.cap_bytes)
+
+const usageText = computed(() => {
+  const data = usage.data
+  if (!data) return ''
+  if (isFull.value) return 'History is full. Delete older versions to keep saving.'
+  const megabytes = 1024 * 1024
+  return `History uses ${Math.round(data.used_bytes / megabytes)} of ${Math.round(data.cap_bytes / megabytes)} MB`
+})
+
 /** The newest version, whatever the search hides. */
 const currentName = computed(() => history.data?.[0]?.name)
 
 function askRestore(version: PrototypeVersion): void {
   restoring.value = version
   confirmOpen.value = true
+}
+
+function askPrune(version: PrototypeVersion): void {
+  pruning.value = version
+  pruneOpen.value = true
+}
+
+async function onPruned(result: PruneResult): Promise<void> {
+  await Promise.all([history.reload(), usage.reload()])
+  toast.success(`Deleted ${versionLabel(result.deleted)}`)
 }
 
 /**
@@ -239,19 +277,28 @@ function isClickable(version: PrototypeVersion): boolean {
 /** The items of a row's ... menu. Empty means the row gets no menu at all. */
 function menuOptions(version: PrototypeVersion) {
   const isCurrent = version.name === currentName.value
-  if (!isCurrent && version.restorable) {
-    return [
-      {
-        label: 'Restore this version',
-        icon: 'lucide-rotate-ccw',
-        onClick: () => askRestore(version),
-      },
-    ]
+  if (isCurrent) {
+    return undoTarget.value ? [{ label: 'Undo restore', icon: 'lucide-undo-2', onClick: undo }] : []
   }
-  if (isCurrent && undoTarget.value) {
-    return [{ label: 'Undo restore', icon: 'lucide-undo-2', onClick: undo }]
-  }
-  return []
+  const restore = version.restorable
+    ? [{ label: 'Restore this version', icon: 'lucide-rotate-ccw', onClick: () => askRestore(version) }]
+    : []
+  // Only offered once the history is close to the cap: deleting is the way out.
+  const remove = nearlyFull.value
+    ? [
+        {
+          label: 'Delete this and older versions',
+          icon: 'lucide-trash-2',
+          onClick: () => askPrune(version),
+        },
+      ]
+    : []
+  if (!restore.length || !remove.length) return [...restore, ...remove]
+  // Two groups give a separator. The group label is hidden.
+  return [
+    { key: 'restore', group: ' ', hideLabel: true, options: restore },
+    { key: 'delete', group: ' ', hideLabel: true, options: remove },
+  ]
 }
 
 // ------------------------------------------------------------------- dates
@@ -576,10 +623,21 @@ function fileLabel(count: number): string {
         </template>
       </div>
 
+      <p v-if="nearlyFull" class="mt-3 text-sm" :class="isFull ? 'text-ink-red-4' : 'text-ink-gray-5'">
+        {{ usageText }}
+      </p>
+
       <!-- Only when a row lacks a snapshot, so most dialogs never show it. -->
       <p v-if="hasLegacy" class="mt-3 text-xs text-ink-gray-5">
         Versions recorded before restore existed can't be restored.
       </p>
+
+      <PrototypeDeleteVersionsDialog
+        v-model:open="pruneOpen"
+        :slug="prototype.slug"
+        :version="pruning"
+        @deleted="onPruned"
+      />
 
       <!--
         Nested over this dialog. Both are reka dialogs, which stack: the later
