@@ -114,7 +114,7 @@ function chevronFor(isOpen: boolean): string {
 </script>
 
 <template>
-  <Dialog v-model:open="open" size="md" :title="`Restore version ${version?.sequence ?? ''}?`">
+  <Dialog v-model:open="open" size="md" title="Restore this version?">
     <template #default>
       <div class="min-h-24 space-y-3">
         <LoadingText v-if="dryRun.loading" />
