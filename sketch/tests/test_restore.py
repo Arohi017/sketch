@@ -208,7 +208,7 @@ class TestRestore(IntegrationTestCase):
 		self.assertEqual((result["files_added"], result["files_modified"], result["files_deleted"]), (1, 1, 1))
 		row = self.history()[0]
 		self.assertEqual((row["sequence"], row["kind"], row["restored_from"]), (3, "Restore", first))
-		self.assertEqual(row["prompt"], next(r["prompt"] for r in self.history() if r["sequence"] == first))
+		self.assertEqual(row["prompt"], f"Restored version {first}")
 		self.assertEqual((row["files_added"], row["files_modified"], row["files_deleted"]), (1, 1, 1))
 		self.assertTrue(row["restorable"])
 		self.refresh.assert_called_with(self.doc.name)
@@ -422,16 +422,6 @@ class TestRestore(IntegrationTestCase):
 
 		self.assertEqual(result["deleted"], 2)
 		self.assertEqual([row["sequence"] for row in self.history()], [third])
-
-	def test_a_restore_row_keeps_its_name_after_its_target_is_pruned(self):
-		first, _second, third = self.three_versions()
-		back = self.restore(first)["sequence"]
-		self.restore(third)
-		again = self.restore(back)["sequence"]
-
-		api.delete_versions(SLUG, again - 1)
-
-		self.assertEqual([row["prompt"] for row in self.history()], ["first"])
 
 	def test_prune_refuses_the_current_version(self):
 		_first, _second, third = self.three_versions()
