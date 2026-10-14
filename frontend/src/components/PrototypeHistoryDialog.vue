@@ -135,7 +135,7 @@ const needle = computed(() => query.value.trim().toLowerCase())
 
 function matches(version: PrototypeVersion): boolean {
   if (version.prompt.toLowerCase().includes(needle.value)) return true
-  if (`version ${version.sequence}`.includes(needle.value)) return true
+  if (`version ${version.sequence}`.includes(needle.value) || `v${version.sequence}` === needle.value) return true
   if (version.kind !== 'restore') return false
   return restoreTarget(version)?.prompt.toLowerCase().includes(needle.value) ?? false
 }
@@ -581,7 +581,7 @@ function fileLabel(count: number): string {
               </div>
 
               <p class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-sm text-ink-gray-5">
-                <span>Version {{ version.sequence }}</span>
+                <span>v{{ version.sequence }}</span>
                 <span aria-hidden="true">&middot;</span>
                 <template v-if="version.name === currentName">
                   <span class="font-medium text-ink-gray-7">Current</span>
