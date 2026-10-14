@@ -17,8 +17,11 @@ class SketchPrototypeVersion(Document):
 		files_added: DF.Int
 		files_deleted: DF.Int
 		files_modified: DF.Int
+		kind: DF.Literal["Request", "Restore", "Created"]
+		manifest: DF.LongText | None
 		prompt: DF.LongText
 		prototype: DF.Link
+		restored_from: DF.Int
 		sequence: DF.Int
 		summary: DF.Data | None
 	# end: auto-generated types

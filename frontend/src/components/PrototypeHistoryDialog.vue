@@ -5,32 +5,49 @@
  * The agent records a version at the end of each user request. The prompt is
  * what the person recognises, so it leads the row. Everything else is meta.
  *
+ * The newest row is Current. Every other row that kept a snapshot has a
+ * Restore button, which opens the confirm step (`PrototypeRestoreDialog`). A
+ * restore is recorded as a new version on top, so it is never a loss: while
+ * that restore is Current, its row carries an Undo that restores the version
+ * just below it.
+ *
+ * Undo lives on the row and not in a toast. A modal reka dialog sets
+ * `pointer-events: none` on the body and its overlay catches every click, so a
+ * toast action under an open dialog cannot be clicked: the click closes the
+ * dialog instead.
+ *
  * The list sits in a fixed-height scroll box, so the loading, empty, error and
  * loaded states all have the same size and the dialog never jumps.
  */
-import { ref, watch } from 'vue'
-import { Badge, Button, Dialog, ErrorMessage, LoadingText, useCall } from 'frappe-ui'
+import { computed, ref, watch } from 'vue'
+import {
+  Badge,
+  Button,
+  Dialog,
+  ErrorMessage,
+  LoadingText,
+  toast,
+  useCall,
+} from 'frappe-ui'
+import PrototypeChangeList from './PrototypeChangeList.vue'
+import PrototypeRestoreDialog from './PrototypeRestoreDialog.vue'
 import { method } from '../store'
-import type { Prototype, PrototypeVersion } from '../types'
+import type { Prototype, PrototypeVersion, RestoreResult } from '../types'
 
 /**
- * Tailwind builds a `lucide-*` class only when it reads the literal string in
- * this project's source, so the names live here and not in the API response.
+ * The glyph before the text of a row the agent did not write a request for.
+ * A request row has none. Tailwind builds a `lucide-*` class only when it
+ * reads the literal string in this project's source, so the names live here.
  */
-const ACTION_ICONS: Record<string, string> = {
-  added: 'lucide-file-plus',
-  modified: 'lucide-file-pen-line',
-  deleted: 'lucide-file-minus',
-}
-
-const ACTION_COLORS: Record<string, string> = {
-  added: 'text-ink-green-7',
-  modified: 'text-ink-blue-7',
-  deleted: 'text-ink-red-7',
+const KIND_ICONS: Record<string, string> = {
+  restore: 'lucide-undo-2',
+  created: 'lucide-sparkles',
 }
 
 const props = defineProps<{ prototype: Prototype }>()
 const open = defineModel<boolean>('open', { required: true })
+// The card reloads the gallery on this, so the thumbnail and "Updated" move.
+const emit = defineEmits<{ restored: [] }>()
 
 const history = useCall<PrototypeVersion[], { slug: string }>({
   url: method('list_versions'),
@@ -38,6 +55,18 @@ const history = useCall<PrototypeVersion[], { slug: string }>({
   immediate: false,
   initialData: [],
 })
+
+// Same method as the confirm step, with the dry run off. Undo needs no preview:
+// it puts back the tree the person was just looking at, as a new version.
+const undoRestore = useCall<RestoreResult, { slug: string; sequence: number; dry_run: 0 }>({
+  url: method('restore_version'),
+  method: 'POST',
+  immediate: false,
+})
+
+/** The version the confirm step is about. Kept after close, for the fade. */
+const restoring = ref<PrototypeVersion | null>(null)
+const confirmOpen = ref(false)
 
 /** Versions whose full prompt is shown, by version name. */
 const openPrompts = ref<Set<string>>(new Set())
@@ -53,6 +82,48 @@ watch(open, (value) => {
   history.reload()
 })
 
+/** True when some row has no snapshot, so the footer can say why. */
+const hasLegacy = computed(() => history.data?.some((version) => !version.restorable))
+
+function askRestore(version: PrototypeVersion): void {
+  restoring.value = version
+  confirmOpen.value = true
+}
+
+/**
+ * The version Undo puts back: the row under a Current restore, which is the
+ * tree as it stood right before that restore (a pending change was committed
+ * as its own version first). None when row 0 is not a restore, or when the
+ * row under it is a legacy row with no snapshot.
+ */
+const undoTarget = computed(() => {
+  const [current, before] = history.data ?? []
+  if (current?.kind !== 'restore' || !before?.restorable) return null
+  return before
+})
+
+/** Show the new version and tell the card. The new row carries the Undo. */
+async function onRestored(): Promise<void> {
+  const target = restoring.value
+  await history.reload()
+  emit('restored')
+  toast.success(`Restored to version ${target?.sequence}`)
+}
+
+async function undo(): Promise<void> {
+  const target = undoTarget.value
+  if (!target) return
+  try {
+    await undoRestore.submit({ slug: props.prototype.slug, sequence: target.sequence, dry_run: 0 })
+  } catch (error) {
+    toast.error((error as Error).message)
+    return
+  }
+  await history.reload()
+  emit('restored')
+  toast.success('Undid the restore')
+}
+
 function toggle(set: Set<string>, name: string): Set<string> {
   const next = new Set(set)
   if (next.has(name)) next.delete(name)
@@ -60,17 +131,13 @@ function toggle(set: Set<string>, name: string): Set<string> {
   return next
 }
 
-/** A prompt long enough to clamp. Three lines is the clamp. */
-function isLong(prompt: string): boolean {
-  return prompt.split('\n').length > 3 || prompt.length > 180
-}
-
-function actionIcon(action: string): string {
-  return ACTION_ICONS[action] ?? 'lucide-file'
-}
-
-function actionColor(action: string): string {
-  return ACTION_COLORS[action] ?? 'text-ink-gray-6'
+/**
+ * A prompt long enough to clamp. Three lines is the clamp. Only a request row
+ * can be long: a restore or created row is one short line the server wrote.
+ */
+function isLong(version: PrototypeVersion): boolean {
+  if (version.kind !== 'request') return false
+  return version.prompt.split('\n').length > 3 || version.prompt.length > 180
 }
 
 /**
@@ -124,26 +191,47 @@ function fileLabel(count: number): string {
           rule across a rounded corner.
         -->
         <ul v-else class="divide-y divide-outline-gray-1">
-          <li v-for="version in history.data" :key="version.name" class="py-3 first:pt-0">
+          <li
+            v-for="(version, index) in history.data"
+            :key="version.name"
+            class="py-3 first:pt-0"
+          >
             <div class="flex items-start gap-3">
-              <p
-                class="min-w-0 flex-1 whitespace-pre-line text-p-base text-ink-gray-8"
-                :class="openPrompts.has(version.name) ? '' : 'line-clamp-3'"
-              >
-                {{ version.prompt }}
-              </p>
+              <!--
+                A restore or created row leads with a glyph and a quieter ink,
+                so it reads as a mark in the timeline and not as something the
+                person asked for. `mt-0.5` centres the 16px glyph on the first
+                line of `text-p-base`.
+              -->
+              <div class="flex min-w-0 flex-1 items-start gap-2">
+                <span
+                  v-if="KIND_ICONS[version.kind]"
+                  :class="[KIND_ICONS[version.kind], 'mt-0.5 size-4 shrink-0 text-ink-gray-5']"
+                  aria-hidden="true"
+                />
+                <p
+                  class="min-w-0 flex-1 whitespace-pre-line text-p-base"
+                  :class="[
+                    version.kind === 'request' ? 'text-ink-gray-8' : 'text-ink-gray-7',
+                    openPrompts.has(version.name) ? '' : 'line-clamp-3',
+                  ]"
+                >
+                  {{ version.prompt }}
+                </p>
+              </div>
               <!--
                 A fixed trailing column, per DESIGN.md principle 5. `created`
                 is `pretty_date` in long form (`sketch/api.py:241`), so the
-                text runs from "just now" to "22 minutes ago"; `w-24` holds the
-                longest of those on one line and every prompt then ends on the
-                same x.
+                text runs from "just now" to "22 minutes ago". With "v12 · "
+                in front, `w-36` holds the longest of those on one line and
+                every prompt then ends on the same x. `tabular-nums` keeps the
+                version number from shifting the digits.
               -->
               <span
-                class="w-24 shrink-0 whitespace-nowrap text-right text-xs text-ink-gray-5"
+                class="w-36 shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-ink-gray-5"
                 :title="version.creation"
               >
-                {{ version.created }}
+                v{{ version.sequence }} &middot; {{ version.created }}
               </span>
             </div>
 
@@ -152,6 +240,8 @@ function fileLabel(count: number): string {
             </p>
 
             <div class="mt-2 flex flex-wrap items-center gap-2">
+              <!-- The newest row is the live tree, so it has nothing to restore. -->
+              <Badge v-if="index === 0" label="Current" size="sm" theme="gray" />
               <Badge
                 v-if="version.files_added"
                 :label="`${version.files_added} added`"
@@ -186,32 +276,49 @@ function fileLabel(count: number): string {
               />
 
               <Button
-                v-if="isLong(version.prompt)"
+                v-if="isLong(version)"
                 :icon-left="chevronFor(openPrompts.has(version.name))"
                 :label="openPrompts.has(version.name) ? 'Show less' : 'Show full prompt'"
                 size="sm"
                 variant="ghost"
                 @click="openPrompts = toggle(openPrompts, version.name)"
               />
+
+              <!--
+                At the right end of the row, where the eye ends. The label
+                names the version for a screen reader, because every row says
+                just "Restore".
+              -->
+              <Button
+                v-if="index > 0 && version.restorable"
+                :aria-label="`Restore version ${version.sequence}`"
+                class="ml-auto"
+                icon-left="lucide-rotate-ccw"
+                label="Restore"
+                size="sm"
+                variant="ghost"
+                @click="askRestore(version)"
+              />
+
+              <!-- Same spot as Restore, on the one row that can be taken back. -->
+              <Button
+                v-if="index === 0 && undoTarget"
+                :aria-label="`Undo, back to version ${undoTarget.sequence}`"
+                class="ml-auto"
+                icon-left="lucide-undo-2"
+                label="Undo"
+                :loading="undoRestore.loading"
+                size="sm"
+                variant="ghost"
+                @click="undo"
+              />
             </div>
 
-            <ul
+            <PrototypeChangeList
               v-if="openFiles.has(version.name)"
-              class="mt-2 space-y-1 rounded-4 bg-surface-gray-2 px-3 py-2"
-            >
-              <li
-                v-for="change in version.changes"
-                :key="change.path"
-                class="flex items-center gap-2 text-xs text-ink-gray-7"
-              >
-                <span
-                  :class="[actionIcon(change.action), actionColor(change.action), 'size-3.5 shrink-0']"
-                  aria-hidden="true"
-                />
-                <span class="truncate">{{ change.path }}</span>
-                <span class="ml-auto shrink-0 text-ink-gray-5">{{ change.action }}</span>
-              </li>
-            </ul>
+              class="mt-2"
+              :changes="version.changes"
+            />
           </li>
         </ul>
       </div>
@@ -225,9 +332,23 @@ function fileLabel(count: number): string {
         list and never becomes a heading. The value is constant while the
         dialog is open, so this row cannot move the panel.
       -->
-      <p class="mt-3 truncate border-t border-outline-gray-1 pt-3 text-xs text-ink-gray-5">
-        Version {{ prototype.pin }}
-      </p>
+      <div class="mt-3 space-y-1 border-t border-outline-gray-1 pt-3 text-xs text-ink-gray-5">
+        <!-- Only when a row lacks a snapshot, so most dialogs never show it. -->
+        <p v-if="hasLegacy">Versions recorded before restore existed can't be restored.</p>
+        <p class="truncate">Version {{ prototype.pin }}</p>
+      </div>
+
+      <!--
+        Nested over this dialog. Both are reka dialogs, which stack: the later
+        portal sits on top, Escape closes only the top one, and focus returns
+        here when it closes.
+      -->
+      <PrototypeRestoreDialog
+        v-model:open="confirmOpen"
+        :slug="prototype.slug"
+        :version="restoring"
+        @restored="onRestored"
+      />
     </template>
   </Dialog>
 </template>

@@ -336,6 +336,11 @@ const menuOptions = computed(() => [
       :slug="prototype.slug"
       :title="prototype.title"
     />
-    <PrototypeHistoryDialog v-model:open="historyOpen" :prototype="prototype" />
+    <!-- A restore changes the tree, so the picture and "Updated" are stale. -->
+    <PrototypeHistoryDialog
+      v-model:open="historyOpen"
+      :prototype="prototype"
+      @restored="emit('changed')"
+    />
   </article>
 </template>

@@ -10,13 +10,26 @@ A write tool notes its change and records nothing. The note lands in the
 Prototype's `pending_changes` list, folded by path. The agent calls `commit`
 once at the end of the user request. That writes one Sketch Prototype Version
 row from the whole pending list and clears it, so one request makes one
-version however many tool calls it took. A Version stores the prompt, the time
-and the file names. It stores no file content, so there is no revert.
+version however many tool calls it took.
+
+A Version stores the prompt, the time, the file names, and a manifest: the hash
+of every file in the tree after it (`sketch/snapshots.py` holds the bytes). So
+any version can be restored. A restore is itself recorded as a new version, of
+kind Restore, which means it can be undone the same way. History is never
+rewritten. The kinds are Request (a `commit`), Restore, and Created (the
+first version of a new or forked Prototype).
+
+A row recorded before manifests existed has an empty one, and cannot be
+restored.
 """
 
 import json
 
 import frappe
+from frappe.query_builder import Order
+from frappe.query_builder.functions import IfNull
+
+from sketch import snapshots, thumbnails
 
 ADDED = "added"
 MODIFIED = "modified"
@@ -24,6 +37,10 @@ DELETED = "deleted"
 
 PROTOTYPE = "Sketch Prototype"
 VERSION = "Sketch Prototype Version"
+
+REQUEST = "Request"
+RESTORE = "Restore"
+CREATED = "Created"
 
 
 def note(name: str, path: str, action: str) -> None:
@@ -99,12 +116,35 @@ def commit(doc, prompt: str, summary: str | None = None):
 	if not changes:
 		return None
 
+	version = record(doc, REQUEST, prompt, changes, snapshots.capture(doc.name), summary=summary)
+	_set_pending(doc.name, [])
+	return version
+
+
+def record(
+	doc,
+	kind: str,
+	prompt: str,
+	changes: list[dict],
+	manifest: dict,
+	restored_from: int | None = None,
+	summary: str | None = None,
+):
+	"""Insert one version row. Returns the version doc.
+
+	The one insert behind `commit`, `restore` and `record_created`. The caller
+	holds the Prototype row `for update` already, so the sequence it reads
+	here is its own.
+	"""
 	version = frappe.new_doc(VERSION)
 	version.prototype = doc.name
 	version.sequence = _next_sequence(doc.name)
+	version.kind = kind
+	version.restored_from = restored_from
 	version.prompt = prompt
 	version.summary = summary
 	version.changes = json.dumps(changes)
+	version.manifest = json.dumps(manifest)
 	version.files_added = _count(changes, ADDED)
 	version.files_modified = _count(changes, MODIFIED)
 	version.files_deleted = _count(changes, DELETED)
@@ -112,36 +152,92 @@ def commit(doc, prompt: str, summary: str | None = None):
 	# `if_owner` rules let that person read the history.
 	version.owner = doc.owner
 	version.insert(ignore_permissions=True)
-
-	_set_pending(doc.name, [])
 	return version
+
+
+def record_created(doc, prompt: str):
+	"""Record version 1 of a Prototype that starts with files: every file added.
+
+	Called by create and fork once the tree is written, so a restore can always
+	go back to how the Prototype began.
+	"""
+	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
+	manifest = snapshots.capture(doc.name)
+	return record(doc, CREATED, prompt, snapshots.diff({}, manifest), manifest)
+
+
+def restore(doc, sequence: int, dry_run: bool = False) -> dict:
+	"""Put the tree back as it was after version `sequence`.
+
+	The restore is recorded as a new version, so history only grows and a
+	restore can be undone by restoring the version before it. Changes still
+	pending are committed first, so work the agent had not filed is not lost.
+
+	Raises frappe.ValidationError for a version that does not exist or that was
+	recorded before manifests did. With `dry_run` it only reports the files
+	that would change. A restore that would change nothing records nothing.
+	"""
+	frappe.db.get_value(PROTOTYPE, doc.name, "name", for_update=True)
+
+	target = _manifest_of(doc.name, sequence)
+	changes = snapshots.diff(snapshots.capture(doc.name), target)
+	result = {"sequence": sequence, "changes": changes, **_counts(changes)}
+	if dry_run:
+		return result
+
+	if not changes:
+		return {**result, "recorded": False}
+
+	if pending(doc.name):
+		commit(doc, f"Unsaved changes, kept before restoring version {sequence}")
+
+	snapshots.apply(doc.name, target)
+	version = record(
+		doc, RESTORE, f"Restored version {sequence}", changes, target, restored_from=sequence
+	)
+	thumbnails.request_refresh(doc.name)
+	return {
+		**result,
+		"recorded": True,
+		"sequence": version.sequence,
+		"restored_from": sequence,
+	}
 
 
 def history(name: str) -> list[dict]:
 	"""Every version of this Prototype, newest first.
 
-	Read with frappe.get_all, which applies no permission check. The caller
+	Read with frappe.qb, which applies no permission check. The caller
 	resolves the Prototype through prototype.resolve_owned first, and that is
 	the check that guards this list.
+
+	The manifest is never returned: it is the size of the tree, and the list
+	only needs to know whether one exists (`restorable`).
 	"""
-	rows = frappe.get_all(
-		VERSION,
-		filters={"prototype": name},
-		fields=[
-			"name",
-			"sequence",
-			"prompt",
-			"summary",
-			"changes",
-			"files_added",
-			"files_modified",
-			"files_deleted",
-			"creation",
-		],
-		order_by="sequence desc",
+	table = frappe.qb.DocType(VERSION)
+	rows = (
+		frappe.qb.from_(table)
+		.select(
+			table.name,
+			table.sequence,
+			table.kind,
+			table.restored_from,
+			table.prompt,
+			table.summary,
+			table.changes,
+			table.files_added,
+			table.files_modified,
+			table.files_deleted,
+			table.creation,
+			(IfNull(table.manifest, "") != "").as_("restorable"),
+		)
+		.where(table.prototype == name)
+		.orderby(table.sequence, order=Order.desc)
+		.run(as_dict=True)
 	)
 	for row in rows:
 		row["changes"] = _parse(row.get("changes"))
+		row["restorable"] = bool(row.get("restorable"))
 
 	return rows
 
@@ -208,6 +304,32 @@ def _next_sequence(name: str) -> int:
 	return (last[0][0] or 0) + 1
 
 
+def _manifest_of(name: str, sequence: int) -> dict:
+	"""The stored manifest of one version. Raises when it cannot be restored."""
+	row = frappe.db.get_value(VERSION, {"prototype": name, "sequence": sequence}, "manifest")
+	if row is None:
+		frappe.throw(frappe._("No version {0}").format(sequence), frappe.ValidationError)
+
+	manifest = _parse_manifest(row)
+	if not manifest:
+		frappe.throw(
+			frappe._("Version {0} can't be restored. It was recorded before restore existed.").format(
+				sequence
+			),
+			frappe.ValidationError,
+		)
+
+	return manifest
+
+
+def _counts(changes: list[dict]) -> dict:
+	return {
+		"files_added": _count(changes, ADDED),
+		"files_modified": _count(changes, MODIFIED),
+		"files_deleted": _count(changes, DELETED),
+	}
+
+
 def _count(changes: list[dict], action: str) -> int:
 	return sum(1 for row in changes if row.get("action") == action)
 
@@ -223,3 +345,13 @@ def _parse(raw) -> list:
 		return []
 
 	return changes if isinstance(changes, list) else []
+
+
+def _parse_manifest(raw) -> dict:
+	"""A stored manifest string back as a dict. Never raises."""
+	try:
+		manifest = json.loads(raw or "")
+	except ValueError:
+		return {}
+
+	return manifest if isinstance(manifest, dict) else {}
