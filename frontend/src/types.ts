@@ -112,6 +112,45 @@ export interface PrototypeVersion {
   files_deleted: number
   creation: string
   created: string
+  /**
+   * What recorded the row: an agent request, a Restore, or the first tree.
+   * A restore row reads differently in the history list.
+   */
+  kind: 'request' | 'restore' | 'created'
+  /** On a restore row, the `sequence` it restored. Null on every other row. */
+  restored_from: number | null
+  /** On a restore row, who asked: the Sketch UI or the agent. Null otherwise. */
+  source: 'App' | 'Agent' | null
+  /**
+   * False for a row recorded before the server kept snapshots. Such a row has
+   * nothing to go back to, so it gets no Restore button.
+   */
+  restorable: boolean
+}
+
+/** The file counts a restore changes, dry run or not. */
+export interface RestoreSummary {
+  changes: PrototypeFileChange[]
+  files_added: number
+  files_modified: number
+  files_deleted: number
+}
+
+/** `sketch.api.restore_version` with `dry_run: 1`. Nothing is written. */
+export interface RestorePreview extends RestoreSummary {
+  sequence: number
+}
+
+/**
+ * `sketch.api.restore_version` with `dry_run: 0`.
+ *
+ * `recorded` is false when the tree already matched, and then no new version
+ * exists, so `sequence` and `restored_from` may be absent.
+ */
+export interface RestoreResult extends RestoreSummary {
+  recorded: boolean
+  sequence?: number
+  restored_from?: number
 }
 
 export interface Recipe {
@@ -130,4 +169,16 @@ export interface AgentToken {
   last_used?: string | null
   /** See `SketchSession.last_used_pretty`. */
   last_used_pretty?: string | null
+}
+
+/** `sketch.api.delete_versions`, dry run or not. */
+export interface PruneResult {
+  deleted: number
+  freed_bytes: number
+}
+
+/** `sketch.api.history_usage`: bytes the history takes, and the most it may take. */
+export interface HistoryUsage {
+  used_bytes: number
+  cap_bytes: number
 }

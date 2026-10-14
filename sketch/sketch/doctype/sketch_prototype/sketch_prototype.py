@@ -27,15 +27,20 @@ class SketchPrototype(Document):
 		"""Delete the on-disk tree. Without this, orphan directories build up.
 
 		A force delete skips the link check, so the Version rows go too. The
-		card images live outside the tree, so they need their own line
-		(`sketch/thumbnails.py`).
+		card images (`sketch/thumbnails.py`) and the version snapshots
+		(`sketch/snapshots.py`) live outside the tree, so they need their own
+		lines.
 		"""
+		from functools import partial
+
+		from sketch import snapshots, thumbnails
 		from sketch.prototype_files import delete_tree
-		from sketch.thumbnails import forget
 
 		frappe.db.delete("Sketch Prototype Version", {"prototype": self.name})
 		delete_tree(self.name)
-		forget(self.name)
+		thumbnails.forget(self.name)
+		# After the commit, so a delete that rolls back keeps its history.
+		frappe.db.after_commit.add(partial(snapshots.forget, self.name))
 
 
 def on_doctype_update():

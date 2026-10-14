@@ -54,9 +54,18 @@ class ToolResult:
 	content: list[dict] = field(default_factory=list)
 
 
-READ_ONLY = {"list_prototypes", "list_files", "read_files", "check", "get_skill", "list_runtimes", "get_annotations"}
+READ_ONLY = {
+	"list_prototypes",
+	"list_files",
+	"read_files",
+	"check",
+	"get_skill",
+	"list_runtimes",
+	"get_annotations",
+	"list_versions",
+}
 
-DESTRUCTIVE = {"delete_file", "set_public"}
+DESTRUCTIVE = {"delete_file", "set_public", "restore_version"}
 
 
 def annotations(name: str) -> dict:
@@ -314,6 +323,7 @@ def do_read_files(args: dict) -> ToolResult:
 
 def do_write_files(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	files = args.get("files")
 	if not isinstance(files, list) or not files:
 		frappe.throw(frappe._("files must be a list of {path, content} objects"))
@@ -333,6 +343,7 @@ def do_write_files(args: dict) -> ToolResult:
 
 def do_edit_file(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args.get("path")
 	old_string = args.get("old_string")
 	new_string = args.get("new_string")
@@ -347,6 +358,7 @@ def do_edit_file(args: dict) -> ToolResult:
 def do_upload_asset(args: dict) -> ToolResult:
 	"""Keep images inside the existing source tree and permission boundary."""
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args["path"]
 	if not path.startswith("src/assets/") or not path.endswith(".js"):
 		frappe.throw("path must be a JavaScript module under src/assets/, such as src/assets/logo.js")
@@ -361,6 +373,7 @@ def do_upload_asset(args: dict) -> ToolResult:
 
 def do_edit_files(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	paths = prototype_files.edit_files(doc.name, args["edits"])
 	versions.note_write(doc.name, paths, set(paths))
 	return ToolResult(text=f"Edited {len(paths)} file(s): {', '.join(paths)}")
@@ -368,6 +381,7 @@ def do_edit_files(args: dict) -> ToolResult:
 
 def do_delete_file(args: dict) -> ToolResult:
 	doc = owned(args)
+	versions.lock(doc.name)
 	path = args.get("path")
 	if not path:
 		frappe.throw(frappe._("path is required"))
@@ -404,6 +418,70 @@ def do_commit(args: dict) -> ToolResult:
 		version.sequence, version.files_added, version.files_modified, version.files_deleted
 	)
 	return ToolResult(text=text, structured=payload)
+
+
+def do_list_versions(args: dict) -> ToolResult:
+	"""The version history, newest first. The text shows the newest 30."""
+	doc = owned(args)
+	rows = [version_row(row) for row in versions.history(doc.name)]
+	shown = rows[:VERSION_TEXT_ROWS]
+	lines = [version_line(row) for row in shown]
+	if len(rows) > len(shown):
+		lines.append(f"... and {len(rows) - len(shown)} older version(s) not shown.")
+
+	text = "\n".join(lines) or "No versions yet."
+	return ToolResult(text=text, structured={"versions": rows})
+
+
+def version_row(row: dict) -> dict:
+	return {
+		"sequence": row.get("sequence"),
+		"kind": (row.get("kind") or versions.REQUEST).lower(),
+		"prompt": row.get("prompt") or "",
+		"summary": row.get("summary") or "",
+		"files_added": row.get("files_added") or 0,
+		"files_modified": row.get("files_modified") or 0,
+		"files_deleted": row.get("files_deleted") or 0,
+		"restorable": bool(row.get("restorable")),
+		"created": str(row.get("creation") or ""),
+	}
+
+
+def version_line(row: dict) -> str:
+	"""One line per version: the number, the kind, the prompt, the file counts."""
+	prompt = " ".join(row["prompt"].split())
+	if len(prompt) > 100:
+		prompt = prompt[:97] + "..."
+
+	line = "v{0} [{1}] {2} (+{3} ~{4} -{5}) {6}".format(
+		row["sequence"],
+		row["kind"],
+		prompt,
+		row["files_added"],
+		row["files_modified"],
+		row["files_deleted"],
+		row["created"],
+	)
+	return line if row["restorable"] else line + " (cannot be restored)"
+
+
+def do_restore_version(args: dict) -> ToolResult:
+	"""Restore the files to how they were after an earlier version."""
+	doc = owned(args)
+	result = versions.restore(doc, int(args["sequence"]), bool(args.get("dry_run")), source="Agent")
+	counts = "{0} added, {1} changed, {2} deleted".format(
+		result["files_added"], result["files_modified"], result["files_deleted"]
+	)
+	if args.get("dry_run"):
+		text = f"Restoring version {result['sequence']} would change {counts}. Nothing was written."
+	elif not result.get("recorded"):
+		text = f"The files already match version {result['sequence']}. Nothing recorded."
+	else:
+		text = "Restored version {0} as version {1}. {2}.".format(
+			result["restored_from"], result["sequence"], counts
+		)
+
+	return ToolResult(text=text, structured=result)
 
 
 def do_get_annotations(args: dict) -> ToolResult:
@@ -586,6 +664,52 @@ COMMIT_SCHEMA = {
 		"changes": {"type": "array", "items": CHANGE_SCHEMA},
 	},
 	"required": ["recorded"],
+}
+
+
+#: The text of `list_versions` shows this many rows. The structured output has all.
+VERSION_TEXT_ROWS = 30
+
+VERSION_SCHEMA = {
+	"type": "object",
+	"properties": {
+		"sequence": {"type": "integer"},
+		"kind": {"type": "string", "enum": ["request", "restore", "created"]},
+		"prompt": {"type": "string"},
+		"summary": {"type": "string"},
+		"files_added": {"type": "integer"},
+		"files_modified": {"type": "integer"},
+		"files_deleted": {"type": "integer"},
+		"restorable": {"type": "boolean", "description": "False for a version recorded before restore existed."},
+		"created": {"type": "string"},
+	},
+	"required": ["sequence", "kind", "prompt", "restorable"],
+}
+
+LIST_VERSIONS_SCHEMA = {
+	"type": "object",
+	"properties": {"versions": {"type": "array", "items": VERSION_SCHEMA}},
+	"required": ["versions"],
+}
+
+RESTORE_SCHEMA = {
+	"type": "object",
+	"properties": {
+		"recorded": {
+			"type": "boolean",
+			"description": "False when the files already matched, so nothing was recorded. Absent on a dry run.",
+		},
+		"sequence": {
+			"type": "integer",
+			"description": "The new version's number. On a dry run, or when nothing changed, the version asked for.",
+		},
+		"restored_from": {"type": "integer", "description": "The version that was restored."},
+		"files_added": {"type": "integer"},
+		"files_modified": {"type": "integer"},
+		"files_deleted": {"type": "integer"},
+		"changes": {"type": "array", "items": CHANGE_SCHEMA},
+	},
+	"required": ["sequence", "changes"],
 }
 
 
@@ -870,6 +994,40 @@ def build_tools() -> dict[str, Tool]:
 				},
 				handler=do_commit,
 				output_schema=COMMIT_SCHEMA,
+			),
+			Tool(
+				name="list_versions",
+				description="List the Prototype's versions, newest first. Each has a `sequence`, a `kind` (request, restore or created), the user's prompt, file counts and whether it is `restorable`. Call it to find the sequence to pass to restore_version. The text shows the newest 30.",
+				parameters={
+					"type": "object",
+					"properties": {"prototype": PROTOTYPE_PARAM},
+					"required": ["prototype"],
+				},
+				handler=do_list_versions,
+				output_schema=LIST_VERSIONS_SCHEMA,
+			),
+			Tool(
+				name="restore_version",
+				description="Restore the Prototype's files to how they were after an earlier version. Use it when the user asks to undo, roll back, or go back to an earlier state. The restore is recorded as a new version, so it can itself be undone. Call list_versions first to find the sequence. Pass dry_run to see which files would change. Do not call commit afterwards for the restore itself.",
+				parameters={
+					"type": "object",
+					"properties": {
+						"prototype": PROTOTYPE_PARAM,
+						"sequence": {
+							"type": "integer",
+							"minimum": 1,
+							"description": "The version to go back to, from list_versions.",
+						},
+						"dry_run": {
+							"type": "boolean",
+							"default": False,
+							"description": "Only report the files that would change. Writes nothing.",
+						},
+					},
+					"required": ["prototype", "sequence"],
+				},
+				handler=do_restore_version,
+				output_schema=RESTORE_SCHEMA,
 			),
 			Tool(
 				name="get_annotations",

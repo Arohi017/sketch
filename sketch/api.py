@@ -15,9 +15,19 @@ import os
 from datetime import UTC, datetime
 
 import frappe
-from frappe.utils import convert_utc_to_system_timezone, pretty_date
+from frappe.utils import cint, convert_utc_to_system_timezone, pretty_date
 
-from sketch import annotations, checkd, prototype, prototype_files, signature, thumbnail, thumbnails, versions
+from sketch import (
+	annotations,
+	checkd,
+	prototype,
+	prototype_files,
+	signature,
+	snapshots,
+	thumbnail,
+	thumbnails,
+	versions,
+)
 from sketch.sketch.doctype.sketch_token import sketch_token
 
 #: The eight recipes from ui.frappe.io/recipes, plus Blank (spec 10). The trees
@@ -475,12 +485,50 @@ def list_versions(slug: str) -> list[dict]:
 				"files_added": row.get("files_added") or 0,
 				"files_modified": row.get("files_modified") or 0,
 				"files_deleted": row.get("files_deleted") or 0,
+				"kind": (row.get("kind") or "Request").lower(),
+				"restored_from": row.get("restored_from") or None,
+				"source": row.get("source") or None,
+				"restorable": bool(row.get("restorable")),
 				"creation": str(row.get("creation") or ""),
 				"created": pretty_date(row.get("creation")) if row.get("creation") else "",
 			}
 		)
 
 	return rows
+
+
+@frappe.whitelist(methods=["POST"])
+def restore_version(slug: str, sequence: int, dry_run: int = 0) -> dict:
+	"""Put the Prototype's files back as they were after one version.
+
+	`resolve_owned` is the permission check. The restore is recorded as a new
+	version, so it can be undone. With `dry_run` it only lists the files that
+	would change. See `versions.restore` for the answer.
+	"""
+	doc = prototype.resolve_owned(slug)
+	sequence = cint(sequence)
+	if sequence < 1:
+		frappe.throw(frappe._("sequence must be a version number, 1 or more"), frappe.ValidationError)
+
+	return versions.restore(doc, sequence, bool(cint(dry_run)), source="App")
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_versions(slug: str, sequence: int, dry_run: int = 0) -> dict:
+	"""Delete one version and every older one, to free history space.
+
+	`resolve_owned` is the permission check. The current version stays. See
+	`versions.prune`.
+	"""
+	doc = prototype.resolve_owned(slug)
+	return versions.prune(doc, cint(sequence), bool(cint(dry_run)))
+
+
+@frappe.whitelist()
+def history_usage(slug: str) -> dict:
+	"""How much of the history cap this Prototype has used, in bytes."""
+	doc = prototype.resolve_owned(slug)
+	return {"used_bytes": snapshots.usage(doc.name), "cap_bytes": snapshots.HISTORY_CAP_BYTES}
 
 
 @frappe.whitelist()
@@ -674,6 +722,8 @@ def create_prototype(title: str, recipe: str = "blank") -> dict:
 
 	doc = prototype.create(title)
 	prototype_files.write_files(doc.name, _apply_title(files, doc.title))
+	label = RECIPES.get(recipe, (recipe.replace("-", " ").title(),))[0]
+	versions.record_created(doc, f"Created from the {label} recipe")
 
 	return _row(doc.as_dict())
 
@@ -700,12 +750,13 @@ def fork_prototype(username: str, slug: str) -> dict:
 	  that Runtime, and a fork that renders differently from the card it was
 	  taken from is not a copy.
 	- `is_public` is 0. Publishing is the new owner's decision, never inherited.
-	- No version row and no thumbnail. A Prototype from a Recipe carries
-	  neither either, and the first `check` writes both.
+	- Version 1 is recorded (kind Created), so the fork can be restored to how
+	  it began. No thumbnail: the first `check` writes it.
 
 	Answers the new gallery row, so the caller can draw it without a re-read.
 	"""
-	source = prototype.resolve_readable(slug, (username or "").strip())
+	username = (username or "").strip()
+	source = prototype.resolve_readable(slug, username)
 	tree = prototype_files.read_tree(source.name)
 
 	doc = prototype.create(source.title)
@@ -714,6 +765,7 @@ def fork_prototype(username: str, slug: str) -> dict:
 		doc.save()
 
 	_copy_tree(doc.name, tree)
+	versions.record_created(doc, f"Forked from @{username}/{source.slug}")
 	return _row(doc.as_dict())
 
 
@@ -813,7 +865,7 @@ def refresh_preview(slug: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def delete_prototype(slug: str) -> dict:
-	"""Delete a Prototype. `on_trash` removes its directory."""
+	"""Delete a Prototype. `on_trash` removes its directory, pictures and snapshots."""
 	doc = prototype.resolve_owned(slug)
 	name = doc.name
 	frappe.delete_doc("Sketch Prototype", name)

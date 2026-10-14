@@ -9,12 +9,17 @@
  "field_order": [
   "prototype",
   "sequence",
+  "kind",
+  "restored_from",
+  "source",
   "prompt",
   "summary",
   "changes",
   "files_added",
   "files_modified",
-  "files_deleted"
+  "files_deleted",
+  "manifest",
+  "restorable"
  ],
  "fields": [
   {
@@ -34,6 +39,28 @@
    "label": "Version",
    "read_only": 1,
    "reqd": 1
+  },
+  {
+   "default": "Request",
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Kind",
+   "options": "Request\nRestore\nCreated",
+   "read_only": 1
+  },
+  {
+   "fieldname": "restored_from",
+   "fieldtype": "Int",
+   "label": "Restored From",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Source",
+   "options": "\nApp\nAgent",
+   "read_only": 1
   },
   {
    "fieldname": "prompt",
@@ -73,11 +100,25 @@
    "fieldtype": "Int",
    "label": "Files Deleted",
    "read_only": 1
+  },
+  {
+   "fieldname": "manifest",
+   "fieldtype": "Long Text",
+   "hidden": 1,
+   "label": "Manifest",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "restorable",
+   "fieldtype": "Check",
+   "label": "Restorable",
+   "read_only": 1
   }
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-08-28 00:00:00.000000",
+ "modified": "2026-10-14 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Sketch",
  "name": "Sketch Prototype Version",

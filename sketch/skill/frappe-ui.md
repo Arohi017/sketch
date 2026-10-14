@@ -121,6 +121,8 @@ If the user mentions notes or tweaks they left on the page, call `get_annotation
 
 Finish with `commit`. Copy the user's prompt exactly. Keep the optional summary within 140 characters.
 
+To undo or go back to an earlier state, call `list_versions` to find the sequence, then `restore_version`. Pass `dry_run` to see which files would change first. The restore records itself as a new version, so do not `commit` for it.
+
 ## 3. Rules
 
 1. **Pick the component, do not build one.** Reach for raw HTML only for
