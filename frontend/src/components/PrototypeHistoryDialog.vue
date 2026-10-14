@@ -248,7 +248,7 @@ function fileLabel(count: number): string {
             -->
             <div
               v-if="menuOptions(version, index).length"
-              class="absolute right-2 top-2 opacity-0 focus-within:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100"
+              class="absolute right-2 top-2 opacity-0 has-[:focus-visible]:opacity-100 group-hover:opacity-100 has-[[data-state=open]]:opacity-100"
             >
               <Dropdown align="end" :options="menuOptions(version, index)">
                 <Button
