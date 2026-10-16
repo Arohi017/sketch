@@ -7,7 +7,7 @@ There is no files endpoint. This renderer is the only door, and it carries the
 Prototype source tree inside the page.
 
 It reads the pinned Runtime's own viewer.html from disk and substitutes one
-slot (spec 6.1). It does not rebuild the document from manifest.json: that
+slot (spec 6.1), plus the static <title> for the link preview tags. It does not rebuild the document from manifest.json: that
 would make one document serve every Pin and re-derive the import map the build
 already wrote correctly.
 
@@ -22,10 +22,16 @@ import frappe
 from frappe.utils import escape_html
 from frappe.website.page_renderers.base_renderer import BaseRenderer
 
-from sketch import annotations, prototype, prototype_files, runtime_assets, signature
+from sketch import annotations, prototype, prototype_files, runtime_assets, signature, thumbnail, thumbnails
 
 #: The literal build.sh stamps into each per-Pin viewer.html (contract 4).
 SLOT = "SKETCH_DATA"
+
+#: The static title every Runtime's viewer.html ships. `head_html` replaces it.
+TITLE = "<title>Prototype</title>"
+
+#: The size checkd captures a Thumbnail at (checkd/check-lib.mjs VIEWPORT).
+THUMBNAIL_SIZE = (1280, 800)
 
 #: Spec 6.4. Frappe sets neither, so without them any site could embed a
 #: Prototype, and a browser could serve a stale tree.
@@ -121,6 +127,7 @@ class SketchViewerRenderer(BaseRenderer):
 	def __init__(self, path=None, http_status_code=None):
 		super().__init__(path=path, http_status_code=http_status_code)
 		self.doc = None
+		self.username = ""
 		self.is_owner = False
 
 	def can_render(self) -> bool:
@@ -137,6 +144,7 @@ class SketchViewerRenderer(BaseRenderer):
 		if not self.doc:
 			return False
 
+		self.username = parts[1]
 		self.is_owner = frappe.session.user == self.doc.owner
 		if self.doc.is_public or self.is_owner:
 			return True
@@ -203,6 +211,7 @@ class SketchViewerRenderer(BaseRenderer):
 			# else and the page breaks in a way that is hard to read.
 			return self.build_response(bad_slot_html(self.doc.pin, count), 500, self.response_headers())
 
+		document = document.replace(TITLE, self.head_html(), 1)
 		body = self.sandboxed_document(document.replace(SLOT, to_json(self.payload()), 1))
 		# Only the served document counts as an open. The two branches above
 		# are a broken install, not a reader.
@@ -216,6 +225,49 @@ class SketchViewerRenderer(BaseRenderer):
 		who = "check" if frappe.form_dict.get("sig") else ("owner" if self.is_owner else "public")
 		events.record(events.VIEWER_OPEN, prototype=self.doc.name, detail=who)
 		return self.build_response(body, 200, self.response_headers())
+
+	def head_html(self) -> str:
+		"""The <title> and the Open Graph tags a link preview reads.
+
+		A crawler runs no script, so boot.js setting the title is too late for
+		it. The image is the light Thumbnail, and only on a public Prototype:
+		the crawler is a Guest, and a Guest gets 404 from a private picture.
+		"""
+		author = frappe.db.get_value("User", self.doc.owner, "full_name") or self.username
+		url = f"{prototype.site_url()}/u/{self.username}/{self.doc.slug}"
+		properties = {
+			"og:type": "website",
+			"og:site_name": "Sketch",
+			"og:title": self.doc.title,
+			"og:description": f"A prototype by {author}, built with frappe-ui on Sketch.",
+			"og:url": url,
+		}
+		image = self.preview_image_url()
+		if image:
+			properties.update(
+				{
+					"og:image": image,
+					"og:image:width": str(THUMBNAIL_SIZE[0]),
+					"og:image:height": str(THUMBNAIL_SIZE[1]),
+					"og:image:alt": self.doc.title,
+				}
+			)
+
+		tags = [
+			f"<title>{escape_html(self.doc.title)}</title>",
+			meta_tag("name", "description", properties["og:description"]),
+			meta_tag("name", "twitter:card", "summary_large_image" if image else "summary"),
+		]
+		tags += [meta_tag("property", key, value) for key, value in properties.items()]
+		return "\n    ".join(tags)
+
+	def preview_image_url(self) -> str | None:
+		"""The absolute URL of the light Thumbnail, or None when a crawler cannot read one."""
+		if not self.doc.is_public or "light" not in thumbnails.meta(self.doc.name).get("themes", []):
+			return None
+
+		path = thumbnail.url(self.username, self.doc.slug, "light", thumbnails.stamp(self.doc.name))
+		return f"{prototype.site_url()}{path}"
 
 	def is_live(self) -> bool:
 		"""True when this page may poll sketch.api.signed_revision.
@@ -295,6 +347,11 @@ class SketchViewerRenderer(BaseRenderer):
 			"annotate_sig": mark.get("sig", ""),
 			"theme": url_theme(),
 		}
+
+
+def meta_tag(attribute: str, key: str, content: str) -> str:
+	"""One <meta> tag, with the content escaped for an attribute value."""
+	return f'<meta {attribute}="{key}" content="{escape_html(content)}" />'
 
 
 def missing_runtime_html(pin: str) -> str:

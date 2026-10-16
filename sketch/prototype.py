@@ -181,13 +181,18 @@ def resolve_readable(slug: str, username: str = ""):
 	return doc
 
 
-def public_url(doc) -> str:
-	"""The absolute https://sketch.netchamp.dev/u/<username>/<slug> URL."""
-	username = frappe.db.get_value("User", doc.owner, "username")
+def site_url() -> str:
+	"""The absolute https://sketch.netchamp.dev origin a shared link starts with."""
 	# get_url() appends webserver_port in developer mode, which a shared link
 	# must never carry. site_config host_name is the public host.
 	base = (frappe.local.conf.host_name or frappe.local.conf.hostname or get_url()).rstrip("/")
 	if not base.startswith(("http://", "https://")):
 		base = "https://" + base
 
-	return f"{base}/u/{username}/{doc.slug}"
+	return base
+
+
+def public_url(doc) -> str:
+	"""The absolute https://sketch.netchamp.dev/u/<username>/<slug> URL."""
+	username = frappe.db.get_value("User", doc.owner, "username")
+	return f"{site_url()}/u/{username}/{doc.slug}"

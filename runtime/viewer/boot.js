@@ -137,10 +137,9 @@ function icon(name, size) {
   return node
 }
 
-// viewer.html still ships the constant "Prototype" in <title>, because the
-// renderer substitutes one slot and no more. Two open Prototypes were therefore
-// the same entry in the tab strip and in browser history, and every shared link
-// had the same name. The payload already carries the title, so stamp it here.
+// viewer.html ships the constant "Prototype" in <title>. The renderer replaces
+// it (sketch/viewer.py head_html), and this keeps the tab right for a document
+// served without that step.
 function setTitle(data) {
   const title = typeof data.title === 'string' ? data.title.trim() : ''
   if (title) document.title = title
